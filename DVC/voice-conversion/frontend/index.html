@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Conversion</title>
+<style>
+  :root{--bg:#0a0a0f;--surface:#141420;--surface-2:#1c1c2e;--border:#2a2a40;--text:#e8e8f0;--text-dim:#8888a0;--accent:#6366f1;--accent-glow:rgba(99,102,241,0.15);--success:#22c55e;--error:#ef4444;--radius:10px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+  .app{max-width:720px;margin:0 auto;padding:40px 24px 80px}
+  header{text-align:center;margin-bottom:48px}
+  header h1{font-size:1.75rem;font-weight:600;margin-bottom:6px}
+  header p{color:var(--text-dim);font-size:0.9rem}
+  .section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;margin-bottom:20px}
+  .section-title{font-size:0.8rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:18px}
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:8px;font-size:0.9rem;font-weight:500;transition:all 0.15s}
+  .btn-primary{background:var(--accent);color:white;padding:12px 24px;width:100%}
+  .btn-primary:hover{filter:brightness(1.1)}.btn-primary:disabled{opacity:0.4;cursor:not-allowed}
+  .btn-secondary{background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:8px 16px}
+  .btn-secondary:hover{border-color:var(--accent)}
+  .btn-secondary.active{border-color:var(--accent);background:var(--accent-glow)}
+  .btn-danger{background:transparent;color:var(--error);border:1px solid var(--error);padding:8px 16px;font-size:0.8rem}
+  input[type="text"]{font-family:inherit;font-size:0.9rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px 14px;width:100%;outline:none}
+  input[type="text"]:focus{border-color:var(--accent)}
+  label{display:block;font-size:0.85rem;color:var(--text-dim);margin-bottom:6px}
+  .form-row{margin-bottom:16px}
+  .upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;position:relative}
+  .upload-zone:hover{border-color:var(--accent);background:var(--accent-glow)}
+  .upload-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
+  .upload-zone .icon{font-size:2rem;margin-bottom:8px}
+  .upload-zone .label{color:var(--text-dim);font-size:0.85rem}
+  .upload-zone .filename{color:var(--accent);font-size:0.85rem;margin-top:6px}
+  .progress-container{display:none;margin-top:16px}.progress-container.visible{display:block}
+  .progress-bar-track{background:var(--bg);border-radius:4px;height:6px;overflow:hidden}
+  .progress-bar-fill{height:100%;background:var(--accent);border-radius:4px;transition:width 0.3s;width:0%}
+  .progress-text{font-size:0.8rem;color:var(--text-dim);margin-top:8px}
+  .voice-list{list-style:none}
+  .voice-item{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--bg);border-radius:8px;margin-bottom:8px;border:1px solid transparent;cursor:pointer}
+  .voice-item:hover{border-color:var(--border)}.voice-item.active{border-color:var(--accent);background:var(--accent-glow)}
+  .voice-item .name{font-weight:500;font-size:0.9rem}.voice-item .meta{font-size:0.75rem;color:var(--text-dim)}
+  .no-voices{text-align:center;color:var(--text-dim);padding:24px;font-size:0.85rem}
+  .mic-button{width:96px;height:96px;border-radius:50%;background:var(--surface-2);border:3px solid var(--border);color:var(--text);font-size:2.2rem;display:inline-flex;align-items:center;justify-content:center;margin:20px 0}
+  .mic-button:hover{border-color:var(--accent)}.mic-button:disabled{opacity:0.4;cursor:not-allowed}
+  .mic-button.recording{border-color:var(--error);background:rgba(239,68,68,0.1);animation:pulse 1.5s infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.3)}50%{box-shadow:0 0 0 16px rgba(239,68,68,0)}}
+  .stats{display:flex;justify-content:center;gap:32px;margin-top:16px}
+  .stat{text-align:center}.stat .value{font-size:1.25rem;font-weight:600;color:var(--accent)}.stat .label{font-size:0.75rem;color:var(--text-dim);margin-top:2px}
+  .pitch-control{display:flex;align-items:center;gap:12px;margin-top:16px;padding:12px 16px;background:var(--bg);border-radius:8px;flex-wrap:wrap}
+  .pitch-control label{margin:0;white-space:nowrap;font-size:0.8rem}
+  input[type="range"]{flex:1;accent-color:var(--accent);cursor:pointer;min-width:120px}
+  .pitch-value{font-size:0.85rem;font-weight:500;min-width:52px;text-align:right}
+  .pitch-info{font-size:0.75rem;color:var(--text-dim);width:100%;text-align:center;margin-top:4px}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;font-size:0.85rem;opacity:0;transition:all 0.3s;z-index:1000}
+  .toast.visible{transform:translateX(-50%) translateY(0);opacity:1}.toast.error{border-color:var(--error)}.toast.success{border-color:var(--success)}
+  .note{font-size:0.8rem;color:var(--text-dim);margin-top:12px;padding:10px;background:var(--bg);border-radius:8px;text-align:center}
+</style>
+</head>
+<body>
+<div class="app">
+  <header><h1>Voice Conversion</h1><p>Train target voices, convert in real time</p></header>
+
+  <div class="section">
+    <div class="section-title">Train a Voice</div>
+    <div class="form-row"><label>Voice name</label><input type="text" id="voiceName" placeholder="e.g. john_voice"/></div>
+    <div class="form-row">
+      <div class="upload-zone">
+        <input type="file" id="audioFile" accept=".wav,.mp3,.flac,.ogg,.m4a,.aac"/>
+        <div class="icon">🎤</div><div class="label">Drop audio here or click to browse</div>
+        <div class="label" style="margin-top:4px">10-15 min clean audio recommended</div>
+        <div class="filename" id="fileName"></div>
+      </div>
+    </div>
+    <button class="btn-primary" id="trainBtn" onclick="startTraining()" disabled>Upload & Train</button>
+    <div class="progress-container" id="trainProgress">
+      <div class="progress-bar-track"><div class="progress-bar-fill" id="trainProgressBar"></div></div>
+      <div class="progress-text" id="trainProgressText"></div>
+    </div>
+    <div class="note">Training runs in the background — you can use conversion while training</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Voices</div>
+    <ul class="voice-list" id="voiceList"><li class="no-voices">No trained voices yet</li></ul>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Convert</div>
+    <div style="text-align:center">
+      <div style="font-size:0.85rem;color:var(--text-dim);margin-bottom:8px">
+        <span id="statusText">Select a voice to begin</span>
+      </div>
+      <button class="mic-button" id="micBtn" onclick="toggleConversion()" disabled>🎙️</button>
+      <div class="pitch-control">
+        <label>Pitch</label>
+        <button class="btn-secondary active" id="pitchAutoBtn" onclick="setPitchMode('auto')" style="padding:6px 12px;font-size:0.8rem">Auto</button>
+        <button class="btn-secondary" id="pitchManualBtn" onclick="setPitchMode('manual')" style="padding:6px 12px;font-size:0.8rem">Manual</button>
+        <input type="range" id="pitchSlider" min="-24" max="24" value="0" step="1" style="display:none"/>
+        <span class="pitch-value" id="pitchValue">auto</span>
+        <div class="pitch-info" id="pitchInfo" style="display:none"></div>
+      </div>
+      <div class="stats" id="statsArea" style="display:none">
+        <div class="stat"><div class="value" id="latencyValue">—</div><div class="label">Latency</div></div>
+        <div class="stat"><div class="value" id="framesValue">0</div><div class="label">Chunks</div></div>
+      </div>
+      <div class="note" style="margin-top:16px">Use headphones to avoid echo feedback</div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const API=location.origin, WS_URL=`ws://${location.host}/api/convert/stream`;
+let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
+let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
+let trainPoll=null, chunkCount=0, pitchMode='auto';
+
+// === Upload ===
+document.getElementById('audioFile').addEventListener('change',function(){
+  if(this.files.length){document.getElementById('fileName').textContent=this.files[0].name;checkReady();}
+});
+document.getElementById('voiceName').addEventListener('input',checkReady);
+function checkReady(){document.getElementById('trainBtn').disabled=!(document.getElementById('voiceName').value.trim()&&document.getElementById('audioFile').files.length);}
+
+// === Training ===
+async function startTraining(){
+  const name=document.getElementById('voiceName').value.trim().replace(/\s+/g,'_').toLowerCase();
+  const file=document.getElementById('audioFile').files[0]; if(!name||!file)return;
+  document.getElementById('trainBtn').disabled=true; showProgress(true,0,'Uploading...');
+  const form=new FormData(); form.append('file',file); form.append('voice_name',name);
+  try{
+    const r=await fetch(`${API}/api/train/upload`,{method:'POST',body:form}); const d=await r.json();
+    if(!r.ok){showToast(d.detail||'Failed','error');document.getElementById('trainBtn').disabled=false;showProgress(false);return;}
+    showToast('Training started!','success');
+    if(trainPoll)clearInterval(trainPoll);
+    trainPoll=setInterval(async()=>{
+      try{const r2=await fetch(`${API}/api/train/status/${name}`);const d2=await r2.json();
+        showProgress(true,d2.progress||0,d2.message||'');
+        if(d2.status==='complete'){clearInterval(trainPoll);showToast('Voice ready!','success');document.getElementById('trainBtn').disabled=false;showProgress(false);loadVoices();document.getElementById('voiceName').value='';document.getElementById('fileName').textContent='';document.getElementById('audioFile').value='';}
+        else if(d2.status==='error'){clearInterval(trainPoll);showToast(d2.message||'Failed','error');document.getElementById('trainBtn').disabled=false;showProgress(false);}
+      }catch(e){}
+    },2000);
+  }catch(e){showToast(e.message,'error');document.getElementById('trainBtn').disabled=false;showProgress(false);}
+}
+function showProgress(v,p=0,t=''){document.getElementById('trainProgress').classList.toggle('visible',v);document.getElementById('trainProgressBar').style.width=`${(p*100).toFixed(1)}%`;document.getElementById('trainProgressText').textContent=t;}
+
+// === Voices ===
+async function loadVoices(){try{const r=await fetch(`${API}/api/voices/`);const d=await r.json();renderVoices(d.voices||[]);}catch(e){}}
+function renderVoices(voices){
+  const list=document.getElementById('voiceList');
+  if(!voices.length){list.innerHTML='<li class="no-voices">No trained voices yet</li>';return;}
+  list.innerHTML=voices.map(v=>`<li class="voice-item ${selectedVoice===v.name?'active':''}" onclick="selectVoice('${v.name}')"><div><div class="name">${v.name}</div><div class="meta">${v.epochs?v.epochs+' epochs':''} ${v.training_time_min?'· '+v.training_time_min.toFixed(0)+' min':''}</div></div><div><button class="btn-danger" onclick="event.stopPropagation();deleteVoice('${v.name}')">Delete</button></div></li>`).join('');
+}
+function selectVoice(n){selectedVoice=n;loadVoices();document.getElementById('micBtn').disabled=false;document.getElementById('statusText').textContent=`Ready: ${n}`;}
+async function deleteVoice(n){if(!confirm(`Delete "${n}"?`))return;try{await fetch(`${API}/api/voices/${n}`,{method:'DELETE'});if(selectedVoice===n){selectedVoice=null;document.getElementById('micBtn').disabled=true;document.getElementById('statusText').textContent='Select a voice';}showToast('Deleted','success');loadVoices();}catch(e){}}
+
+// === Pitch Mode ===
+function setPitchMode(mode){
+  pitchMode=mode;
+  document.getElementById('pitchAutoBtn').classList.toggle('active',mode==='auto');
+  document.getElementById('pitchManualBtn').classList.toggle('active',mode==='manual');
+  document.getElementById('pitchSlider').style.display=mode==='manual'?'':'none';
+  document.getElementById('pitchValue').textContent=mode==='auto'?'auto':`${document.getElementById('pitchSlider').value} st`;
+  document.getElementById('pitchInfo').style.display='none';
+
+  // If converting, update pitch immediately
+  if(isConverting && ws && ws.readyState===1){
+    if(mode==='manual'){
+      ws.send(JSON.stringify({action:'set_pitch',pitch_shift:parseInt(document.getElementById('pitchSlider').value)}));
+    }
+  }
+}
+
+// === Conversion ===
+function toggleConversion(){if(isConverting)stopConversion();else startConversion();}
+
+async function startConversion(){
+  if(!selectedVoice||isConverting)return;
+  isConverting=true; chunkCount=0;
+  try{
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
+
+    playCtx=new AudioContext({sampleRate:48000}); await playCtx.resume(); nextPlayTime=0;
+    captureCtx=new AudioContext({sampleRate:48000}); await captureCtx.resume();
+    const src=captureCtx.createMediaStreamSource(mediaStream);
+    scriptProc=captureCtx.createScriptProcessor(4096,1,1);
+
+    const mute=captureCtx.createGain(); mute.gain.value=0;
+    mute.connect(captureCtx.destination);
+    src.connect(scriptProc); scriptProc.connect(mute);
+
+    ws=new WebSocket(WS_URL); ws.binaryType='arraybuffer';
+    let ready=false;
+
+    ws.onopen=()=>{
+      const pitchVal = pitchMode==='auto' ? 'auto' : parseInt(document.getElementById('pitchSlider').value);
+      ws.send(JSON.stringify({voice:selectedVoice,pitch_shift:pitchVal,sample_rate:48000}));
+      ready=true;
+      if(pitchMode==='auto') document.getElementById('pitchValue').textContent='detecting...';
+    };
+
+    ws.onmessage=(ev)=>{
+      if(typeof ev.data==='string'){
+        try{const m=JSON.parse(ev.data);
+          if(m.auto_pitch_result){
+            const ap=m.auto_pitch_result;
+            document.getElementById('pitchValue').textContent=`${ap.shift>=0?'+':''}${ap.shift} st`;
+            document.getElementById('pitchInfo').style.display='block';
+            document.getElementById('pitchInfo').textContent=`Your voice: ${ap.source_f0}Hz → Target: ${ap.target_f0}Hz`;
+            // Also update slider position
+            document.getElementById('pitchSlider').value=ap.shift;
+          }
+          if(m.stats){
+            document.getElementById('latencyValue').textContent=(m.stats.total_latency_ms||0).toFixed(0)+'ms';
+            document.getElementById('framesValue').textContent=m.stats.frames_processed||0;
+          }
+          if(m.error)showToast(m.error,'error');
+        }catch(e){}
+        return;
+      }
+      chunkCount++;
+      const f32=new Float32Array(ev.data); if(!f32.length)return;
+      const buf=playCtx.createBuffer(1,f32.length,48000);
+      buf.getChannelData(0).set(f32);
+      const s=playCtx.createBufferSource(); s.buffer=buf;
+      s.connect(playCtx.destination);
+      const now=playCtx.currentTime;
+      if(nextPlayTime<=now) nextPlayTime=now+0.02;
+      s.start(nextPlayTime); nextPlayTime+=buf.duration;
+      document.getElementById('framesValue').textContent=chunkCount;
+    };
+
+    ws.onerror=()=>showToast('Connection error','error');
+    ws.onclose=()=>{if(isConverting)stopConversion();};
+
+    scriptProc.onaudioprocess=(e)=>{
+      if(ws&&ready&&ws.readyState===1){
+        const d=e.inputBuffer.getChannelData(0);
+        const c=new Float32Array(d.length); c.set(d);
+        ws.send(c.buffer);
+      }
+    };
+
+    document.getElementById('micBtn').classList.add('recording');
+    document.getElementById('statusText').textContent=`Converting → ${selectedVoice}`;
+    document.getElementById('statsArea').style.display='flex';
+  }catch(e){isConverting=false;showToast('Mic error: '+e.message,'error');}
+}
+
+function stopConversion(){
+  isConverting=false;
+  if(ws){const r=ws;ws=null;try{r.send(JSON.stringify({action:'stop'}));}catch(e){}try{r.close();}catch(e){}}
+  if(scriptProc)try{scriptProc.disconnect();}catch(e){}scriptProc=null;
+  if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());}mediaStream=null;
+  if(captureCtx)try{captureCtx.close();}catch(e){}captureCtx=null;
+  if(playCtx)try{playCtx.close();}catch(e){}playCtx=null;
+  document.getElementById('micBtn').classList.remove('recording');
+  document.getElementById('statusText').textContent=selectedVoice?`Ready: ${selectedVoice}`:'Select a voice';
+  document.getElementById('statsArea').style.display='none';
+}
+
+document.getElementById('pitchSlider').addEventListener('input',(e)=>{
+  const v=parseInt(e.target.value);
+  document.getElementById('pitchValue').textContent=`${v>=0?'+':''}${v} st`;
+  if(isConverting&&ws&&ws.readyState===1){
+    ws.send(JSON.stringify({action:'set_pitch',pitch_shift:v}));
+  }
+});
+
+function showToast(m,t=''){const e=document.getElementById('toast');e.textContent=m;e.className=`toast ${t} visible`;setTimeout(()=>e.classList.remove('visible'),3500);}
+loadVoices(); setInterval(loadVoices,15000);
+</script>
+</body>
+</html>
