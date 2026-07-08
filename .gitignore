@@ -1,2 +1,4 @@
 *.pth
 *.index
+DVC/voice-conversion/voices/**/*.pth
+DVC/voice-conversion/voices/**/*.index
