@@ -1,6 +1,6 @@
 """
 Stream Processor with overlap-crossfade for smooth RVC streaming.
-Includes frame-level output gating to eliminate RVC artifacts.
+Includes lightweight noise suppression (high-pass filter) and output gating.
 """
 
 import numpy as np
@@ -27,6 +27,12 @@ class StreamProcessor:
         self.silence_count = 0
         self.silence_hangover = 0
 
+        # High-pass filter for noise suppression
+        self._hp_sos = None
+
+        # Timing for health endpoint
+        self.last_inference_ms = 0
+
     def start(self, voice_path, pitch_shift=0, input_sr=48000):
         self.converter.load_voice(voice_path)
         self.pitch_shift = pitch_shift
@@ -39,6 +45,14 @@ class StreamProcessor:
         self.speech_active = False
         self.silence_count = 0
         self.is_active = True
+
+        # Init high-pass filter (80Hz, removes hum/rumble)
+        try:
+            from scipy.signal import butter
+            self._hp_sos = butter(4, 80, btype='high', fs=input_sr, output='sos')
+            print("[StreamProcessor] High-pass noise filter enabled")
+        except ImportError:
+            self._hp_sos = None
 
         self.fade_in = np.linspace(0, 1, self.overlap_samples, dtype=np.float32)
         self.fade_out = np.linspace(1, 0, self.overlap_samples, dtype=np.float32)
@@ -112,9 +126,16 @@ class StreamProcessor:
             return None
 
         try:
+            # High-pass noise filter (<1ms overhead)
+            if self._hp_sos is not None:
+                from scipy.signal import sosfilt
+                chunk = sosfilt(self._hp_sos, chunk).astype(np.float32)
+
+            import time as _t; _t0 = _t.perf_counter()
             converted = self.converter.convert_streaming(
                 chunk, sr=self.input_sr, pitch_shift=self.pitch_shift,
             )
+            self.last_inference_ms = (_t.perf_counter() - _t0) * 1000
             if converted is None or len(converted) == 0:
                 return None
 

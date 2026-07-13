@@ -21,6 +21,10 @@ from api.routes_train import router as train_router
 from api.routes_convert import router as convert_router
 from api.routes_voices import router as voices_router
 
+import time as _time
+_server_start_time = _time.time()
+_inference_times = []
+
 app = FastAPI(
     title="Voice Conversion System (RVC)",
     description="Real-time voice conversion powered by RVC",
@@ -69,6 +73,7 @@ async def startup():
 
 
 app.state.app_state = state
+app.state.inference_times = _inference_times
 
 app.include_router(train_router, prefix="/api/train", tags=["Training"])
 app.include_router(convert_router, prefix="/api/convert", tags=["Conversion"])
@@ -88,6 +93,27 @@ async def serve_test_audio():
 
 @app.get("/health")
 async def health_check():
+    import torch
+
+    gpu_info = {}
+    if torch.cuda.is_available():
+        gpu_info = {
+            "gpu_name": torch.cuda.get_device_name(0),
+            "gpu_memory_used_mb": round(torch.cuda.memory_allocated(0) / 1e6, 1),
+            "gpu_memory_cached_mb": round(torch.cuda.memory_reserved(0) / 1e6, 1),
+            "gpu_memory_total_mb": round(torch.cuda.get_device_properties(0).total_memory / 1e6, 1),
+        }
+
+    latency_info = {}
+    if _inference_times:
+        recent = _inference_times[-100:]
+        latency_info = {
+            "avg_inference_ms": round(sum(recent) / len(recent), 1),
+            "min_inference_ms": round(min(recent), 1),
+            "max_inference_ms": round(max(recent), 1),
+            "total_inferences": len(_inference_times),
+        }
+
     return {
         "status": "ok",
         "backend": "RVC",
@@ -95,6 +121,9 @@ async def health_check():
         "models_loaded": state.converter._models_loaded if state.converter else False,
         "current_voice": state.converter.current_voice_name if state.converter else None,
         "training_active": state.trainer.is_training if state.trainer else False,
+        "uptime_seconds": round(_time.time() - _server_start_time),
+        "gpu": gpu_info,
+        "latency": latency_info,
     }
 
 

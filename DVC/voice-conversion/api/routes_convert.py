@@ -246,6 +246,10 @@ async def stream_convert(websocket: WebSocket):
                 if output_bytes is not None:
                     await websocket.send_bytes(output_bytes)
 
+                    # Track inference time for health endpoint
+                    if hasattr(websocket.app.state, "inference_times") and processor.last_inference_ms > 0:
+                        websocket.app.state.inference_times.append(processor.last_inference_ms)
+
                     if frame_count % 50 == 0:
                         avg_latency = total_latency / frame_count
                         await websocket.send_json({
