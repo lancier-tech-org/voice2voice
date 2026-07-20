@@ -80,7 +80,7 @@ class RVCConverter:
             print(f"[RVCConverter] HuBERT: {self._hubert_path}")
 
         from rvc.modules.vc.modules import VC
-        self.vc = VC()
+        from configs.config import Config; rvc_config = Config(); self.vc = VC(rvc_config)
         self._models_loaded = True
         print("[RVCConverter] RVC engine ready.")
 

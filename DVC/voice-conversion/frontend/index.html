@@ -109,7 +109,7 @@
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const API=location.origin, WS_URL=`ws://${location.host}/api/convert/stream`;
+const API=location.origin, WS_URL=`wss://${location.host}/api/convert/stream`;
 let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 let trainPoll=null, chunkCount=0, pitchMode='auto';
