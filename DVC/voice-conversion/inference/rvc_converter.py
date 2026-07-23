@@ -80,7 +80,7 @@ class RVCConverter:
             print(f"[RVCConverter] HuBERT: {self._hubert_path}")
 
         from rvc.modules.vc.modules import VC
-        from configs.config import Config; rvc_config = Config(); self.vc = VC(rvc_config)
+        self.vc = VC()
         self._models_loaded = True
         print("[RVCConverter] RVC engine ready.")
 
@@ -140,7 +140,7 @@ class RVCConverter:
         sf.write(tmp_path, audio, sr)
 
         try:
-            tgt_sr, audio_opt, times, _ = self.vc.vc_inference(
+            tgt_sr, audio_opt, times, _ = self.vc.vc_single(
                 sid=0,
                 input_audio_path=tmp_path,
                 f0_up_key=int(pitch_shift),
@@ -155,7 +155,7 @@ class RVCConverter:
             )
 
             if audio_opt is None:
-                print("[RVCConverter] WARNING: vc_inference returned None")
+                print("[RVCConverter] WARNING: vc_single returned None")
                 return np.zeros(len(audio), dtype=np.float32)
 
             self.tgt_sr = tgt_sr

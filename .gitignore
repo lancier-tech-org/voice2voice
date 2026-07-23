@@ -4,3 +4,13 @@ DVC/voice-conversion/voices/**/*.pth
 DVC/voice-conversion/voices/**/*.index
 *.pth
 *.index
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Deployment bundles / archives (large, not source)
+*.zip
+
+# Local debug captures
+DVC/voice-conversion/uploads/

@@ -1,0 +1,52 @@
+###############################################################################
+# Voice2Voice — Docker Compose (GPU-enabled)
+# Usage: docker compose up -d --build
+###############################################################################
+
+services:
+  voice2voice:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: v2v-app
+    restart: unless-stopped
+    shm_size: "2gb"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist trained voice models across container restarts
+      - v2v-voices:/app/voice-conversion/voices
+      # Persist uploaded training audio
+      - v2v-uploads:/app/voice-conversion/uploads
+      # Persist pretrained models (hubert, rmvpe)
+      - v2v-pretrained:/app/voice-conversion/pretrained
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  v2v-voices:
+    name: v2v-voices
+  v2v-uploads:
+    name: v2v-uploads
+  v2v-pretrained:
+    name: v2v-pretrained

@@ -213,13 +213,27 @@ class RVCTrainer:
 
     def _run_train(self, voice_name, sr_str, epochs, batch_size, progress_callback):
         """Step 5: Run the actual training."""
-        # Find pretrained models
+        # Find pretrained models.
+        #
+        # These are NOT optional. RVC fine-tunes from a base model trained on
+        # thousands of hours of speech; the per-voice run only adapts it. Training
+        # without them starts from random weights, and ~200 epochs on a few minutes
+        # of audio cannot learn to synthesise speech — it yields a checkpoint that
+        # looks valid (right shape, "200epoch" tag) but sounds badly degraded.
+        #
+        # This previously fell back to "" and trained anyway, silently producing a
+        # broken voice with no error. Fail loudly instead.
         pretrained_G = str(RVC_WEBUI_DIR / "assets" / "pretrained_v2" / f"f0G{sr_str}.pth")
         pretrained_D = str(RVC_WEBUI_DIR / "assets" / "pretrained_v2" / f"f0D{sr_str}.pth")
-        if not os.path.exists(pretrained_G):
-            pretrained_G = ""
-        if not os.path.exists(pretrained_D):
-            pretrained_D = ""
+        missing = [p for p in (pretrained_G, pretrained_D) if not os.path.exists(p)]
+        if missing:
+            raise RuntimeError(
+                "Pretrained base models are missing, so training would start from "
+                "random weights and produce an unusable voice. Missing: "
+                + ", ".join(missing)
+                + ". Download f0G{sr}.pth and f0D{sr}.pth into "
+                  "assets/pretrained_v2/ before training.".format(sr=sr_str)
+            )
 
         # Build command — train.py uses argparse via get_hparams()
         cmd_parts = [

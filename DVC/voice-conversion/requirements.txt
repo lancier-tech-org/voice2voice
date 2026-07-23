@@ -14,11 +14,17 @@ resampy>=0.4.2
 # Pre-trained models
 transformers>=4.35.0
 
+# RVC engine.
+# This is the package the app is written against: it provides VC() and
+# vc_single(..., index_file=, hubert_path=). It is NOT the vendored RVC-WebUI —
+# that one has an incompatible vc_single() and produces worse conversions.
+# It also pins the audio stack (numpy<2, librosa 0.10.x, soundfile 0.12.x, av 11),
+# which is what keeps this environment matching the dev machine.
+rvc==0.3.5
+
 # RVC dependencies
 fairseq==0.12.2
 faiss-cpu>=1.7.0
-torchcrepe
-av
 matplotlib
 
 # API server

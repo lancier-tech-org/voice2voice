@@ -27,6 +27,16 @@ class StreamProcessor:
         self.silence_count = 0
         self.silence_hangover = 0
 
+        # Noise gate, keyed off the CLEAN INPUT rather than the converted output.
+        # RVC invents noise in pauses (it has no speech to work from), which is the
+        # audible "background disturbance". The input tells us exactly where speech
+        # is, so we silence the output everywhere it isn't. This SILENCES rather
+        # than drops, so the timeline is preserved and nothing gets chopped.
+        self.gate_enabled = True
+        self.gate_threshold = 0.006      # input RMS below this = not speech
+        self.gate_hangover_frames = 6    # ~120ms release, keeps word tails intact
+        self._gate_prev = 0.0
+
         # High-pass filter for noise suppression
         self._hp_sos = None
 
@@ -44,6 +54,7 @@ class StreamProcessor:
         self.prev_tail = None
         self.speech_active = False
         self.silence_count = 0
+        self._gate_prev = 0.0
         self.is_active = True
 
         # Init high-pass filter (80Hz, removes hum/rumble)
@@ -95,6 +106,49 @@ class StreamProcessor:
 
         return result
 
+    def _gate_to_reference(self, output, ref):
+        """
+        Silence `output` wherever the clean input `ref` has no speech.
+
+        This removes the noise RVC hallucinates during pauses — the audible
+        background disturbance — without deleting any samples, so playback timing
+        stays correct. Vectorised (no per-sample loop) to stay real-time, and the
+        gate ramps smoothly across chunk boundaries so there are no clicks.
+        """
+        n = len(output)
+        if n == 0:
+            return output
+
+        ref = ref[:n]
+        if len(ref) < n:
+            ref = np.pad(ref, (0, n - len(ref)))
+
+        frame = max(1, int(0.02 * self.input_sr))          # 20ms analysis frames
+        nframes = max(1, n // frame)
+        env = np.sqrt(np.mean(ref[:nframes * frame].reshape(nframes, frame) ** 2, axis=1))
+        gate = (env > self.gate_threshold).astype(np.float32)
+
+        # Hold the gate open briefly after speech so quiet word endings survive.
+        hold = 0
+        for i in range(nframes):
+            if gate[i] > 0:
+                hold = self.gate_hangover_frames
+            elif hold > 0:
+                gate[i] = 1.0
+                hold -= 1
+
+        # Ramp the frame-rate gate up to sample rate. Seeding with the previous
+        # chunk's final value keeps the transition continuous across chunks.
+        xf = (np.arange(nframes) + 0.5) * frame
+        smooth = np.interp(
+            np.arange(n),
+            np.concatenate(([0.0], xf, [float(n - 1)])),
+            np.concatenate(([self._gate_prev], gate, [gate[-1]])),
+        ).astype(np.float32)
+        self._gate_prev = float(gate[-1])
+
+        return (output * smooth).astype(np.float32)
+
     def process(self, audio_bytes):
         if not self.is_active:
             return None
@@ -108,23 +162,15 @@ class StreamProcessor:
         chunk = self.input_buffer[:self.chunk_samples].copy()
         self.input_buffer = self.input_buffer[self.stride_samples:]
 
-        # VAD
-        rms = np.sqrt(np.mean(chunk ** 2))
-        is_speech_now = rms > self.vad_threshold
+        # Keep an unmodified copy of the input aligned with the output we will
+        # emit; the noise gate is keyed off it.
+        gate_ref = chunk[:self.stride_samples].copy()
 
-        if is_speech_now:
-            self.speech_active = True
-            self.silence_count = 0
-        else:
-            self.silence_count += 1
-            if self.silence_count > self.silence_hangover:
-                self.speech_active = False
-                self.prev_tail = None
-                return None
-
-        if not self.speech_active:
-            return None
-
+        # NOTE: we deliberately no longer drop quiet chunks. Returning None here
+        # meant those chunks were never sent, so the browser played the remaining
+        # audio back-to-back — measured at 3.7s (11%) of speech lost in a 33.7s
+        # session, chopping words together. Pauses are now silenced by the gate
+        # instead, which keeps the timeline intact.
         try:
             # High-pass noise filter (<1ms overhead)
             if self._hp_sos is not None:
@@ -163,10 +209,11 @@ class StreamProcessor:
             elif len(output) < target_len:
                 output = np.pad(output, (0, target_len - len(output)))
 
-            # Only silence entire chunks that are clearly not speech
-            chunk_rms = np.sqrt(np.mean(output ** 2))
-            if chunk_rms < 0.01:
-                return None
+            # Silence the parts where the speaker wasn't actually talking. This is
+            # what removes RVC's hallucinated background noise. Unlike the old
+            # whole-chunk drop, it preserves length and timing.
+            if self.gate_enabled:
+                output = self._gate_to_reference(output, gate_ref)
 
             return output.astype(np.float32).tobytes()
 

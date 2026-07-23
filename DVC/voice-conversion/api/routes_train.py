@@ -91,8 +91,12 @@ async def _train_background(state, voice_name, audio_path):
                 voice_name=voice_name,
                 audio_path=audio_path,
                 sr=48000,
-                epochs=400,
-                batch_size=8,
+                # Use the configured value instead of a hardcoded 400. Measured on
+                # anil_v2: quality peaks around epoch 200 (HNR 11.1) and does not
+                # improve by 400 (10.9, within run-to-run noise), so 400 just
+                # doubled training time — 140 min instead of ~70.
+                epochs=config.TRAINING_EPOCHS,
+                batch_size=config.TRAINING_BATCH_SIZE,
                 progress_callback=progress_callback,
             )
         )
