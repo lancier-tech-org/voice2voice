@@ -109,7 +109,7 @@
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const API=location.origin, WS_PROTO=(location.protocol==='https:'?'wss:':'ws:'), WS_URL=`${WS_PROTO}//${location.host}/api/convert/stream`;
+const API=location.origin, WS_PROTO=(location.protocol==="https:"?"wss:":"ws:"), WS_URL=`${WS_PROTO}//${location.host}/api/convert/stream`;
 let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 let trainPoll=null, chunkCount=0, pitchMode='auto';
@@ -229,29 +229,8 @@ async function startConversion(){
       document.getElementById('framesValue').textContent=chunkCount;
     };
 
-    var reconnectAttempt=0; ws.onerror=()=>showToast('Connection error','error');
-    ws.onclose=()=>{
-      if(!isConverting||ws===null)return;
-      reconnectAttempt++;
-      var delay=Math.min(1000*Math.pow(2,reconnectAttempt-1),30000);
-      showToast('Reconnecting in '+(delay/1000)+'s...','error');
-      document.getElementById('statusText').textContent='Reconnecting...';
-      setTimeout(function(){
-        if(!isConverting)return;
-        var nws=new WebSocket(WS_URL);nws.binaryType='arraybuffer';
-        nws.onopen=function(){
-          reconnectAttempt=0;
-          nws.send(JSON.stringify({voice:selectedVoice,pitch_shift:parseInt(document.getElementById('pitchSlider').value),sample_rate:48000}));
-          ready=true;ws=nws;
-          showToast('Reconnected!','success');
-          document.getElementById('statusText').textContent='Converting → '+selectedVoice;
-        };
-        nws.onmessage=ws.onmessage;
-        nws.onerror=ws.onerror;
-        nws.onclose=ws.onclose;
-        ws=nws;
-      },delay);
-    };
+    ws.onerror=()=>showToast('Connection error','error');
+    ws.onclose=()=>{if(isConverting)stopConversion();};
 
     scriptProc.onaudioprocess=(e)=>{
       if(ws&&ready&&ws.readyState===1){
