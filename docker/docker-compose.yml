@@ -20,6 +20,11 @@ services:
       - v2v-uploads:/app/voice-conversion/uploads
       # Persist pretrained models (hubert, rmvpe)
       - v2v-pretrained:/app/voice-conversion/pretrained
+      # Training checkpoints (every -se epochs) and training logs. Without these
+      # a rebuild recreates the container and discards every intermediate
+      # checkpoint, so you cannot go back and pick a better epoch afterwards.
+      - v2v-weights:/app/rvc-webui/assets/weights
+      - v2v-trainlogs:/app/rvc-webui/logs
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -50,3 +55,7 @@ volumes:
     name: v2v-uploads
   v2v-pretrained:
     name: v2v-pretrained
+  v2v-weights:
+    name: v2v-weights
+  v2v-trainlogs:
+    name: v2v-trainlogs
