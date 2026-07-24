@@ -75,8 +75,13 @@
     <div class="progress-container" id="trainProgress">
       <div class="progress-bar-track"><div class="progress-bar-fill" id="trainProgressBar"></div></div>
       <div class="progress-text" id="trainProgressText"></div>
+      <div id="trainControls" style="display:flex;gap:8px;margin-top:12px;justify-content:center;flex-wrap:wrap">
+        <button class="btn-secondary" id="pauseBtn" onclick="stopTraining('pause')">⏸ Pause</button>
+        <button class="btn-danger" id="cancelBtn" onclick="stopTraining('cancel')">✕ Cancel</button>
+        <button class="btn-primary" id="resumeBtn" style="display:none;width:auto;padding:8px 20px" onclick="resumeTraining()">▶ Resume</button>
+      </div>
     </div>
-    <div class="note">Training runs in the background — you can use conversion while training</div>
+    <div class="note">Training runs in the background — you can use conversion while training.<br>Pause keeps progress (resume later); Cancel discards it.</div>
   </div>
 
   <div class="section">
@@ -112,7 +117,7 @@
 const API=location.origin, WS_PROTO=(location.protocol==="https:"?"wss:":"ws:"), WS_URL=`${WS_PROTO}//${location.host}/api/convert/stream`;
 let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
-let trainPoll=null, chunkCount=0, pitchMode='auto';
+let trainPoll=null, chunkCount=0, pitchMode='auto', currentTrainVoice=null;
 
 // === Upload ===
 document.getElementById('audioFile').addEventListener('change',function(){
@@ -131,17 +136,81 @@ async function startTraining(){
     const r=await fetch(`${API}/api/train/upload`,{method:'POST',body:form}); const d=await r.json();
     if(!r.ok){showToast(d.detail||'Failed','error');document.getElementById('trainBtn').disabled=false;showProgress(false);return;}
     showToast('Training started!','success');
-    if(trainPoll)clearInterval(trainPoll);
-    trainPoll=setInterval(async()=>{
-      try{const r2=await fetch(`${API}/api/train/status/${name}`);const d2=await r2.json();
-        showProgress(true,d2.progress||0,d2.message||'');
-        if(d2.status==='complete'){clearInterval(trainPoll);showToast('Voice ready!','success');document.getElementById('trainBtn').disabled=false;showProgress(false);loadVoices();document.getElementById('voiceName').value='';document.getElementById('fileName').textContent='';document.getElementById('audioFile').value='';}
-        else if(d2.status==='error'){clearInterval(trainPoll);showToast(d2.message||'Failed','error');document.getElementById('trainBtn').disabled=false;showProgress(false);}
-      }catch(e){}
-    },2000);
+    currentTrainVoice=name; trainControls(true,false);
+    pollTraining(name);
   }catch(e){showToast(e.message,'error');document.getElementById('trainBtn').disabled=false;showProgress(false);}
 }
-function showProgress(v,p=0,t=''){document.getElementById('trainProgress').classList.toggle('visible',v);document.getElementById('trainProgressBar').style.width=`${(p*100).toFixed(1)}%`;document.getElementById('trainProgressText').textContent=t;}
+
+function pollTraining(name){
+  currentTrainVoice=name;
+  if(trainPoll)clearInterval(trainPoll);
+  trainPoll=setInterval(async()=>{
+    try{
+      const r2=await fetch(`${API}/api/train/status/${name}`);
+      if(!r2.ok){ // task gone (e.g. cancelled) — stop cleanly
+        clearInterval(trainPoll); resetTrainForm(); loadVoices(); return;
+      }
+      const d2=await r2.json();
+      showProgress(true,d2.progress||0,d2.message||'');
+      if(d2.status==='complete'){clearInterval(trainPoll);trainControls(false);showToast('Voice ready!','success');resetTrainForm();loadVoices();}
+      else if(d2.status==='error'){clearInterval(trainPoll);trainControls(false);showToast(d2.message||'Failed','error');document.getElementById('trainBtn').disabled=false;showProgress(false);}
+      else if(d2.status==='paused'){clearInterval(trainPoll);trainControls(true,true);}
+      else{trainControls(true,false);}
+    }catch(e){}
+  },2000);
+}
+
+async function stopTraining(mode){
+  if(!currentTrainVoice)return;
+  if(mode==='cancel' && !confirm('Cancel this training and discard it? This cannot be undone.'))return;
+  document.getElementById('pauseBtn').disabled=true; document.getElementById('cancelBtn').disabled=true;
+  showProgress(true,null,mode==='pause'?'Pausing...':'Cancelling...');
+  try{
+    const form=new FormData(); form.append('voice_name',currentTrainVoice); form.append('mode',mode);
+    const r=await fetch(`${API}/api/train/stop`,{method:'POST',body:form}); const d=await r.json();
+    document.getElementById('pauseBtn').disabled=false; document.getElementById('cancelBtn').disabled=false;
+    if(!r.ok){showToast(d.detail||'Stop failed','error');return;}
+    if(mode==='cancel'){
+      if(trainPoll)clearInterval(trainPoll);
+      showToast('Training cancelled','success'); resetTrainForm(); setTimeout(loadVoices,1000);
+    }else{
+      showToast('Pausing — you can resume later','success'); // poll will flip to 'paused'
+    }
+  }catch(e){showToast(e.message,'error');document.getElementById('pauseBtn').disabled=false;document.getElementById('cancelBtn').disabled=false;}
+}
+
+async function resumeTraining(){
+  if(!currentTrainVoice)return;
+  document.getElementById('resumeBtn').disabled=true;
+  try{
+    const form=new FormData(); form.append('voice_name',currentTrainVoice);
+    const r=await fetch(`${API}/api/train/resume`,{method:'POST',body:form}); const d=await r.json();
+    document.getElementById('resumeBtn').disabled=false;
+    if(!r.ok){showToast(d.detail||'Resume failed','error');return;}
+    showToast('Resuming from last checkpoint','success');
+    trainControls(true,false); pollTraining(currentTrainVoice);
+  }catch(e){showToast(e.message,'error');document.getElementById('resumeBtn').disabled=false;}
+}
+
+function trainControls(show,paused){
+  document.getElementById('trainControls').style.display=show?'flex':'none';
+  document.getElementById('pauseBtn').style.display=(show&&!paused)?'inline-flex':'none';
+  document.getElementById('cancelBtn').style.display=(show&&!paused)?'inline-flex':'none';
+  document.getElementById('resumeBtn').style.display=(show&&paused)?'inline-flex':'none';
+}
+
+function resetTrainForm(){
+  document.getElementById('trainBtn').disabled=false; showProgress(false); trainControls(false);
+  currentTrainVoice=null;
+  document.getElementById('voiceName').value=''; document.getElementById('fileName').textContent='';
+  document.getElementById('audioFile').value='';
+}
+
+function showProgress(v,p=null,t=null){
+  document.getElementById('trainProgress').classList.toggle('visible',v);
+  if(p!==null)document.getElementById('trainProgressBar').style.width=`${(p*100).toFixed(1)}%`;
+  if(t!==null)document.getElementById('trainProgressText').textContent=t;
+}
 
 // === Voices ===
 async function loadVoices(){try{const r=await fetch(`${API}/api/voices/`);const d=await r.json();renderVoices(d.voices||[]);}catch(e){}}

@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import shutil
+import signal
 import subprocess
 import numpy as np
 import faiss
@@ -22,6 +23,14 @@ import config
 RVC_WEBUI_DIR = Path(config.BASE_DIR).parent / "rvc-webui"
 
 
+class TrainingStopped(Exception):
+    """Raised inside train() when a stop was requested. Carries the mode
+    ('cancel' = discard, 'pause' = keep checkpoints for resume)."""
+    def __init__(self, mode="cancel"):
+        self.mode = mode
+        super().__init__(mode)
+
+
 class RVCTrainer:
     def __init__(self):
         self.is_training = False
@@ -29,16 +38,54 @@ class RVCTrainer:
         self.status_message = ""
         self.python_cmd = sys.executable
 
+        # Stop/resume support. The training subprocess is launched in its own
+        # process group so we can kill it AND its multiprocessing workers together
+        # (killing only the parent leaves GPU workers running — observed in prod).
+        self._proc = None
+        self._stop_mode = None      # None | "cancel" | "pause"
+        self.current_voice = None
+
         if not RVC_WEBUI_DIR.exists():
             print(f"[RVCTrainer] WARNING: RVC WebUI not found at {RVC_WEBUI_DIR}")
             print(f"[RVCTrainer] Clone it: git clone https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git {RVC_WEBUI_DIR}")
 
+    def stop_training(self, mode: str = "cancel") -> bool:
+        """
+        Stop the current training run.
+
+        mode="cancel": discard — caller deletes the artifacts afterwards.
+        mode="pause" : keep logs/<voice> (the G_/D_ checkpoints) so it can resume.
+
+        Kills the whole process group so RVC's multiprocessing GPU workers die too;
+        killing only the parent leaves them running on the GPU.
+        """
+        self._stop_mode = mode if mode in ("cancel", "pause") else "cancel"
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                for _ in range(10):
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.3)
+                if proc.poll() is None:
+                    os.killpg(pgid, signal.SIGKILL)
+                print(f"[RVCTrainer] Stopped training ({self._stop_mode}).")
+            except Exception as e:
+                print(f"[RVCTrainer] stop_training kill error: {e}")
+        return True
+
     def train(self, voice_name: str, audio_path: str,
               sr: int = 40000, epochs: int = 200, batch_size: int = 8,
-              progress_callback: Optional[Callable] = None) -> dict:
+              progress_callback: Optional[Callable] = None,
+              resume: bool = False) -> dict:
 
         self.is_training = True
         self.progress = 0.0
+        self._stop_mode = None
+        self._proc = None
+        self.current_voice = voice_name
         start_time = time.time()
 
         sr_str = {32000: "32k", 40000: "40k", 48000: "48k"}.get(sr, "40k")
@@ -49,28 +96,39 @@ class RVCTrainer:
         voice_output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Step 1: Copy audio to a training directory
-            self._update(0.05, "Preparing audio...", progress_callback)
-            trainset_dir = exp_dir / "raw_audio"
-            trainset_dir.mkdir(exist_ok=True)
-            dst = trainset_dir / Path(audio_path).name
-            shutil.copy2(audio_path, dst)
+            # If resuming and the extracted features already exist, skip the whole
+            # preprocessing pipeline — it is deterministic and was already done.
+            # train.py then auto-resumes from the latest G_/D_ checkpoint in exp_dir.
+            features_ready = (
+                (exp_dir / "filelist.txt").exists()
+                and (exp_dir / "3_feature768").is_dir()
+                and any((exp_dir / "3_feature768").glob("*.npy"))
+            )
+            if resume and features_ready:
+                self._update(0.44, "Resuming from last checkpoint...", progress_callback)
+            else:
+                # Step 1: Copy audio to a training directory
+                self._update(0.05, "Preparing audio...", progress_callback)
+                trainset_dir = exp_dir / "raw_audio"
+                trainset_dir.mkdir(exist_ok=True)
+                dst = trainset_dir / Path(audio_path).name
+                shutil.copy2(audio_path, dst)
 
-            # Step 2: Preprocess (resample, slice)
-            self._update(0.10, "Preprocessing audio (slicing, resampling)...", progress_callback)
-            self._run_preprocess(voice_name, str(trainset_dir), sr_str)
+                # Step 2: Preprocess (resample, slice)
+                self._update(0.10, "Preprocessing audio (slicing, resampling)...", progress_callback)
+                self._run_preprocess(voice_name, str(trainset_dir), sr_str)
 
-            # Step 3: Extract F0 (pitch)
-            self._update(0.25, "Extracting pitch (F0 with RMVPE)...", progress_callback)
-            self._run_extract_f0(voice_name)
+                # Step 3: Extract F0 (pitch)
+                self._update(0.25, "Extracting pitch (F0 with RMVPE)...", progress_callback)
+                self._run_extract_f0(voice_name)
 
-            # Step 4: Extract HuBERT features
-            self._update(0.35, "Extracting HuBERT features...", progress_callback)
-            self._run_extract_features(voice_name)
+                # Step 4: Extract HuBERT features
+                self._update(0.35, "Extracting HuBERT features...", progress_callback)
+                self._run_extract_features(voice_name)
 
-            # Step 5: Generate filelist + config
-            self._update(0.40, "Generating training config...", progress_callback)
-            self._generate_filelist(voice_name, sr_str)
+                # Step 5: Generate filelist + config
+                self._update(0.40, "Generating training config...", progress_callback)
+                self._generate_filelist(voice_name, sr_str)
 
             # Step 6: Train
             self._update(0.45, f"Training model (0/{epochs} epochs)...", progress_callback)
@@ -97,13 +155,24 @@ class RVCTrainer:
             self._update(1.0, "Training complete!", progress_callback)
             return {"status": "success", "voice_dir": str(voice_output_dir), "metadata": meta}
 
+        except TrainingStopped as s:
+            print(f"[RVCTrainer] Training stopped: {s.mode}")
+            return {"status": "stopped", "mode": s.mode,
+                    "progress": round(self.progress, 3)}
         except Exception as e:
             import traceback
             traceback.print_exc()
+            # A stop kills the subprocess, which surfaces as a non-zero exit; treat
+            # that as a stop, not a failure.
+            if self._stop_mode is not None:
+                return {"status": "stopped", "mode": self._stop_mode,
+                        "progress": round(self.progress, 3)}
             self._update(0, f"Training failed: {str(e)}", progress_callback)
             return {"status": "error", "message": str(e)}
         finally:
             self.is_training = False
+            self._proc = None
+            self.current_voice = None
 
     def _run_cmd(self, cmd, step_name):
         """Run a subprocess command in the RVC WebUI directory."""
@@ -258,11 +327,19 @@ class RVCTrainer:
         cmd = " ".join(cmd_parts)
         print(f"[RVCTrainer] Training command: {cmd}")
 
+        # Bail out immediately if a stop was requested before we even launched
+        # (e.g. cancelled during preprocessing).
+        if self._stop_mode is not None:
+            raise TrainingStopped(self._stop_mode)
+
+        # start_new_session=True puts the shell, train.py and its multiprocessing
+        # workers in one process group, so stop_training() can kill them together.
         proc = subprocess.Popen(
             cmd, shell=True, cwd=str(RVC_WEBUI_DIR),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
+            text=True, bufsize=1, start_new_session=True,
         )
+        self._proc = proc
 
         for line in proc.stdout:
             line = line.strip()
@@ -285,6 +362,8 @@ class RVCTrainer:
                         pass
 
         proc.wait()
+        if self._stop_mode is not None:
+            raise TrainingStopped(self._stop_mode)
         if proc.returncode != 0:
             raise RuntimeError(f"Training failed with exit code {proc.returncode}")
 
