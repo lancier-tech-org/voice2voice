@@ -175,18 +175,34 @@ class RVCTrainer:
             self.current_voice = None
 
     def _run_cmd(self, cmd, step_name):
-        """Run a subprocess command in the RVC WebUI directory."""
+        """
+        Run a preprocessing/extraction subprocess in the RVC WebUI directory.
+
+        Launched in its own process group and tracked in self._proc so
+        stop_training() can kill it (and its workers) mid-step. Without this, a
+        Cancel during preprocessing/F0/feature extraction could not interrupt the
+        current step — the run would hang until it finished on its own.
+        """
         print(f"[RVCTrainer] Running: {cmd}")
-        proc = subprocess.run(
+        if self._stop_mode is not None:
+            raise TrainingStopped(self._stop_mode)
+
+        proc = subprocess.Popen(
             cmd, shell=True, cwd=str(RVC_WEBUI_DIR),
-            capture_output=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True,
         )
+        self._proc = proc
+        out, _ = proc.communicate()
+        self._proc = None
+
+        if self._stop_mode is not None:
+            raise TrainingStopped(self._stop_mode)
         if proc.returncode != 0:
-            print(f"[RVCTrainer] {step_name} STDOUT: {proc.stdout[-2000:]}")
-            print(f"[RVCTrainer] {step_name} STDERR: {proc.stderr[-2000:]}")
-            raise RuntimeError(f"{step_name} failed (exit code {proc.returncode}): {proc.stderr[-500:]}")
-        if proc.stdout:
-            print(f"[RVCTrainer] {step_name}: {proc.stdout[-500:]}")
+            print(f"[RVCTrainer] {step_name} OUTPUT: {(out or '')[-2000:]}")
+            raise RuntimeError(f"{step_name} failed (exit code {proc.returncode}): {(out or '')[-500:]}")
+        if out:
+            print(f"[RVCTrainer] {step_name}: {out[-500:]}")
         return proc
 
     def _run_preprocess(self, voice_name, trainset_dir, sr_str):
