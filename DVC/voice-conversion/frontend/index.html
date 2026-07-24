@@ -308,7 +308,13 @@ async function startConversion(){
       const s=playCtx.createBufferSource(); s.buffer=buf;
       s.connect(playCtx.destination);
       const now=playCtx.currentTime;
-      if(nextPlayTime<=now) nextPlayTime=now+0.02;
+      // Jitter buffer. Converted 1s chunks are produced after a ~290ms GPU compute
+      // and arrive unevenly, but the player only scheduled 20ms ahead, so any late
+      // chunk left the player with nothing to play = an audible gap. Scheduling
+      // ~300ms ahead absorbs that unevenness. Costs ~300ms latency (deferred), buys
+      // smoothness. On underrun, resync WITH the cushion so it doesn't keep gapping.
+      const JITTER=0.30;
+      if(nextPlayTime < now + 0.05) nextPlayTime = now + JITTER;
       s.start(nextPlayTime); nextPlayTime+=buf.duration;
       document.getElementById('framesValue').textContent=chunkCount;
     };
