@@ -199,6 +199,21 @@ function trainControls(show,paused){
   document.getElementById('resumeBtn').style.display=(show&&paused)?'inline-flex':'none';
 }
 
+async function restoreTraining(){
+  // On page load, re-attach to a training that is still running or paused on the
+  // server (survives browser refresh / PC restart).
+  try{
+    const r=await fetch(`${API}/api/train/active`); const d=await r.json();
+    if(!d||!d.voice_name)return;
+    currentTrainVoice=d.voice_name;
+    document.getElementById('trainBtn').disabled=true;
+    showProgress(true,d.progress||0,d.message||'');
+    if(d.status==='paused'){ trainControls(true,true); }
+    else { trainControls(true,false); pollTraining(d.voice_name); }
+    showToast('Reconnected to training: '+d.voice_name,'success');
+  }catch(e){}
+}
+
 function resetTrainForm(){
   document.getElementById('trainBtn').disabled=false; showProgress(false); trainControls(false);
   currentTrainVoice=null;
@@ -336,7 +351,7 @@ document.getElementById('pitchSlider').addEventListener('input',(e)=>{
 });
 
 function showToast(m,t=''){const e=document.getElementById('toast');e.textContent=m;e.className=`toast ${t} visible`;setTimeout(()=>e.classList.remove('visible'),3500);}
-loadVoices(); setInterval(loadVoices,15000);
+loadVoices(); setInterval(loadVoices,15000); restoreTraining();
 </script>
 </body>
 </html>

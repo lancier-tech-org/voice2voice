@@ -192,6 +192,18 @@ async def training_status(voice_name: str, request: Request):
     return state.training_tasks[voice_name]
 
 
+@router.get("/active")
+async def active_training(request: Request):
+    """Return the training that is currently in progress or paused, if any, so the
+    UI can re-attach its progress bar and controls after a page reload/restart."""
+    state = request.app.state.app_state
+    live = ("preprocessing", "training", "resuming", "paused")
+    for name, t in state.training_tasks.items():
+        if t.get("status") in live:
+            return {"voice_name": name, **t}
+    return {"voice_name": None}
+
+
 @router.post("/stop")
 async def stop_training(request: Request,
                         voice_name: str = Form(...),
