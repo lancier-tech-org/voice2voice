@@ -27,6 +27,18 @@ class StreamProcessor:
         self.silence_count = 0
         self.silence_hangover = 0
 
+        # Output gate keyed to the CLEAN INPUT: silence output wherever the input
+        # had no speech, to kill the noise RVC hallucinates at pause boundaries.
+        # Threshold sits BELOW the quietest real speech (measured: noise floor
+        # ~0.0005, quietest speech frames ~0.006) so speech is never cut — the
+        # mistake in an earlier attempt was a threshold (0.006) above median speech.
+        # 0.004 chosen by measuring this against a real recording: pause-noise max
+        # 0.12 -> 0.027 (spikes killed) with only ~1.3% speech change. Higher (0.008+)
+        # starts cutting quiet speech; lower (0.002) barely helps.
+        self.gate_enabled = True
+        self.gate_threshold = 0.0040
+        self._gate_prev = 1.0
+
     def start(self, voice_path, pitch_shift=0, input_sr=48000):
         self.converter.load_voice(voice_path)
         self.pitch_shift = pitch_shift
@@ -38,6 +50,7 @@ class StreamProcessor:
         self.prev_tail = None
         self.speech_active = False
         self.silence_count = 0
+        self._gate_prev = 1.0
         self.is_active = True
 
         self.fade_in = np.linspace(0, 1, self.overlap_samples, dtype=np.float32)
@@ -81,6 +94,36 @@ class StreamProcessor:
 
         return result
 
+    def _gate_to_input(self, output, ref):
+        """
+        Silence `output` wherever the clean input `ref` has no speech.
+
+        Keyed to the INPUT (which is clean) rather than the converted output, at a
+        threshold below the quietest speech, so real speech is never removed — it
+        only removes RVC's hallucinated noise in pauses. Smooth 20ms-frame ramp,
+        seeded from the previous chunk so there are no clicks at chunk seams.
+        """
+        n = len(output)
+        if n == 0:
+            return output
+        ref = ref[:n]
+        if len(ref) < n:
+            ref = np.pad(ref, (0, n - len(ref)))
+
+        frame = max(1, int(0.02 * self.input_sr))
+        nf = max(1, n // frame)
+        env = np.sqrt(np.mean(ref[:nf * frame].reshape(nf, frame) ** 2, axis=1))
+        gate = (env > self.gate_threshold).astype(np.float32)
+
+        xf = (np.arange(nf) + 0.5) * frame
+        smooth = np.interp(
+            np.arange(n),
+            np.concatenate(([0.0], xf, [float(n - 1)])),
+            np.concatenate(([self._gate_prev], gate, [gate[-1]])),
+        ).astype(np.float32)
+        self._gate_prev = float(gate[-1])
+        return (output * smooth).astype(np.float32)
+
     def process(self, audio_bytes):
         if not self.is_active:
             return None
@@ -106,10 +149,16 @@ class StreamProcessor:
             if self.silence_count > self.silence_hangover:
                 self.speech_active = False
                 self.prev_tail = None
-                return None
+                # Emit silence for this stride instead of dropping it. Dropping
+                # consumed 1 stride of input but sent 0 output, so the browser
+                # played the rest back-to-back — 55.6s of speech came out as 32s
+                # and sounded rushed/fast. Emitting silence keeps input and output
+                # the same length; we also skip RVC on pauses, avoiding the noise
+                # it hallucinates there.
+                return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
 
         if not self.speech_active:
-            return None
+            return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
 
         try:
             converted = self.converter.convert_streaming(
@@ -142,16 +191,23 @@ class StreamProcessor:
             elif len(output) < target_len:
                 output = np.pad(output, (0, target_len - len(output)))
 
-            # Only silence entire chunks that are clearly not speech
+            # Silence output where the INPUT had no speech — removes RVC's
+            # hallucinated noise at pause boundaries without touching speech.
+            if self.gate_enabled:
+                output = self._gate_to_input(output, chunk[:len(output)])
+
+            # If the converted chunk is essentially silent, emit silence (keeps the
+            # timeline aligned) rather than dropping it (which compressed time).
             chunk_rms = np.sqrt(np.mean(output ** 2))
             if chunk_rms < 0.01:
-                return None
+                return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
 
             return output.astype(np.float32).tobytes()
 
         except Exception as e:
             print(f"[StreamProcessor] Conversion error: {e}")
-            return None
+            # Keep the timeline even on error — emit silence for this stride.
+            return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
 
     def get_latency_ms(self):
         return self.chunk_sec * 1000

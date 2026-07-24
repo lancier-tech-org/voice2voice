@@ -99,6 +99,13 @@ async def stream_convert(websocket: WebSocket):
     processor = state.stream_processor
     frame_count = 0
 
+    # DEV capture (observe-only, off unless DEBUG_RECORD=1). Taps raw mic input and
+    # converted output to disk so streaming changes can be measured against a real
+    # recording. Does NOT touch the audio path.
+    import os as _os
+    dbg_on = _os.getenv("DEBUG_RECORD", "0") == "1"
+    dbg_in, dbg_out = [], []
+
     try:
         config_msg = await websocket.receive_text()
         cfg = json.loads(config_msg)
@@ -237,6 +244,9 @@ async def stream_convert(websocket: WebSocket):
                         auto_pitch_calibrated = True
                         auto_pitch_buffer = []
 
+                if dbg_on:
+                    dbg_in.append(np.frombuffer(audio_bytes, dtype=np.float32).copy())
+
                 t_start = time.perf_counter()
                 output_bytes = processor.process(audio_bytes)
                 t_elapsed = (time.perf_counter() - t_start) * 1000
@@ -244,6 +254,8 @@ async def stream_convert(websocket: WebSocket):
                 total_latency += t_elapsed
 
                 if output_bytes is not None:
+                    if dbg_on:
+                        dbg_out.append(np.frombuffer(output_bytes, dtype=np.float32).copy())
                     await websocket.send_bytes(output_bytes)
 
                     if frame_count % 50 == 0:
@@ -276,3 +288,16 @@ async def stream_convert(websocket: WebSocket):
     finally:
         processor.stop()
         print(f"[WebSocket] Closed. Processed {frame_count} frames.")
+
+        if dbg_on and (dbg_in or dbg_out):
+            try:
+                import soundfile as _sf
+                d = config.UPLOADS_DIR / "debug"; d.mkdir(parents=True, exist_ok=True)
+                st = time.strftime("%H%M%S")
+                if dbg_in:
+                    _sf.write(str(d / f"in_{st}.wav"), np.concatenate(dbg_in), 48000)
+                if dbg_out:
+                    _sf.write(str(d / f"out_{st}.wav"), np.concatenate(dbg_out), 48000)
+                print(f"[DEBUG] capture written to {d} ({st})")
+            except Exception as _e:
+                print(f"[DEBUG] capture failed: {_e}")
