@@ -14,18 +14,32 @@ class StreamProcessor:
         self.pitch_shift = 0.0
         self.input_sr = 48000
 
-        # Process 1.5s chunks with 0.5s overlap for smooth transitions
-        self.chunk_sec = 1.5
-        self.overlap_sec = 0.5
-        self.chunk_samples = None
-        self.overlap_samples = None
-        self.prev_tail = None
+        # REAL context around each emitted block.
+        #
+        # RVC's pipeline reflect-pads every call with x_pad seconds of TIME-REVERSED
+        # audio (x_pad=3 on this T4, so a bare 1.5s chunk was inferred as ~7.5s of
+        # which only 20% was real, and RMVPE estimated F0 over the mirror too). The
+        # words at each chunk edge were therefore conditioned on phonetic nonsense —
+        # that is the boundary garbling. It is also why crossfade and SOLA could not
+        # help: consecutive chunks mirrored DIFFERENT audio, so the shared overlap
+        # was rendered two genuinely different ways, leaving nothing to align.
+        #
+        # So put real audio there instead. History before the block is already in
+        # the buffer, so it costs NO latency; a short lookahead after it gives the
+        # emitted frames right-context too. Only the middle is emitted and the
+        # context margins are discarded, so nothing the listener hears sits next to
+        # fabricated audio.
+        #
+        # Latency is emit + lookahead = 1.5s, the same as the old 1.5s chunk buffer.
+        self.hist_sec = 1.0     # real past context (free — already buffered)
+        self.emit_sec = 1.0     # block actually sent (unchanged: smaller measured worse)
+        self.look_sec = 0.5     # real future context
+        self.lap_sec = 0.010    # short join between consecutive blocks
+        self.pos = 0
+        self.prev_lap = None
 
         # VAD
         self.vad_threshold = 0.003
-        self.speech_active = False
-        self.silence_count = 0
-        self.silence_hangover = 0
 
         # Output gate keyed to the CLEAN INPUT: silence output wherever the input
         # had no speech, to kill the noise RVC hallucinates at pause boundaries.
@@ -44,25 +58,34 @@ class StreamProcessor:
         self.pitch_shift = pitch_shift
         self.input_sr = input_sr
         self.input_buffer = np.array([], dtype=np.float32)
-        self.chunk_samples = int(self.chunk_sec * input_sr)
-        self.overlap_samples = int(self.overlap_sec * input_sr)
-        self.stride_samples = self.chunk_samples - self.overlap_samples
-        self.prev_tail = None
-        self.speech_active = False
-        self.silence_count = 0
+
+        self.hist_samples = int(self.hist_sec * input_sr)
+        self.emit_samples = int(self.emit_sec * input_sr)
+        self.look_samples = int(self.look_sec * input_sr)
+        self.lap_samples = int(self.lap_sec * input_sr)
+        # Kept under the old names so callers/metrics keep working: one emitted
+        # block per call, and this much input must arrive before the first one.
+        self.stride_samples = self.emit_samples
+        self.chunk_samples = self.emit_samples + self.look_samples
+
+        self.pos = 0
+        self.prev_lap = None
         self._gate_prev = 1.0
         self.is_active = True
 
-        self.fade_in = np.linspace(0, 1, self.overlap_samples, dtype=np.float32)
-        self.fade_out = np.linspace(1, 0, self.overlap_samples, dtype=np.float32)
+        self.lap_in = np.linspace(0, 1, self.lap_samples, dtype=np.float32)
+        self.lap_out = 1.0 - self.lap_in
 
         print(f"[StreamProcessor] Started | pitch={pitch_shift} | "
-              f"chunk={self.chunk_samples} overlap={self.overlap_samples} stride={self.stride_samples}")
+              f"hist={self.hist_samples} emit={self.emit_samples} "
+              f"look={self.look_samples} window="
+              f"{self.hist_samples + self.emit_samples + self.look_samples}")
 
     def stop(self):
         self.is_active = False
         self.input_buffer = np.array([], dtype=np.float32)
-        self.prev_tail = None
+        self.pos = 0
+        self.prev_lap = None
         print("[StreamProcessor] Stopped")
 
     def _gate_output(self, audio):
@@ -131,83 +154,75 @@ class StreamProcessor:
         incoming = np.frombuffer(audio_bytes, dtype=np.float32)
         self.input_buffer = np.concatenate([self.input_buffer, incoming])
 
-        if len(self.input_buffer) < self.chunk_samples:
+        # Need the block plus its lookahead before anything can be emitted. The
+        # history behind `pos` is already there and is never waited for.
+        if len(self.input_buffer) < self.pos + self.emit_samples + self.look_samples:
             return None
 
-        chunk = self.input_buffer[:self.chunk_samples].copy()
-        self.input_buffer = self.input_buffer[self.stride_samples:]
+        emit_in = self.input_buffer[self.pos:self.pos + self.emit_samples].copy()
+        w0 = max(0, self.pos - self.hist_samples)
+        w1 = self.pos + self.emit_samples + self.look_samples
+        window = self.input_buffer[w0:w1].copy()
+        off = self.pos - w0                     # emitted block's offset in window
 
-        # VAD
-        rms = np.sqrt(np.mean(chunk ** 2))
-        is_speech_now = rms > self.vad_threshold
+        # Advance, keeping only as much past audio as the history margin needs.
+        self.pos += self.emit_samples
+        if self.pos > self.hist_samples:
+            drop = self.pos - self.hist_samples
+            self.input_buffer = self.input_buffer[drop:]
+            self.pos -= drop
 
-        if is_speech_now:
-            self.speech_active = True
-            self.silence_count = 0
-        else:
-            self.silence_count += 1
-            if self.silence_count > self.silence_hangover:
-                self.speech_active = False
-                self.prev_tail = None
-                # Emit silence for this stride instead of dropping it. Dropping
-                # consumed 1 stride of input but sent 0 output, so the browser
-                # played the rest back-to-back — 55.6s of speech came out as 32s
-                # and sounded rushed/fast. Emitting silence keeps input and output
-                # the same length; we also skip RVC on pauses, avoiding the noise
-                # it hallucinates there.
-                return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
-
-        if not self.speech_active:
-            return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
+        # VAD on the EMITTED region only — a pause inside the context margins must
+        # not suppress a block that does contain speech.
+        if np.sqrt(np.mean(emit_in ** 2)) <= self.vad_threshold:
+            self.prev_lap = None
+            # Silence in place, never a dropped block: dropping consumed input but
+            # sent nothing, so the browser played the rest back-to-back and the
+            # output ran ahead of the speaker. Every path below returns exactly one
+            # block, which is what keeps output in step with speech.
+            return np.zeros(self.emit_samples, dtype=np.float32).tobytes()
 
         try:
             converted = self.converter.convert_streaming(
-                chunk, sr=self.input_sr, pitch_shift=self.pitch_shift,
+                window, sr=self.input_sr, pitch_shift=self.pitch_shift,
             )
             if converted is None or len(converted) == 0:
-                return None
+                return np.zeros(self.emit_samples, dtype=np.float32).tobytes()
 
-            # Apply crossfade with previous chunk's tail
-            if self.prev_tail is not None:
-                overlap_len = min(len(self.prev_tail), self.overlap_samples, len(converted))
-                if overlap_len > 0:
-                    converted[:overlap_len] = (
-                        converted[:overlap_len] * self.fade_in[:overlap_len] +
-                        self.prev_tail[:overlap_len] * self.fade_out[:overlap_len]
-                    )
+            # Cut the emitted block out of the middle. RVC may resample, so map
+            # window offsets through the length ratio rather than assuming 1:1.
+            ratio = len(converted) / float(len(window))
+            s = int(round(off * ratio))
+            need = self.emit_samples + self.lap_samples
+            seg = converted[s:s + need]
+            if len(seg) < need:
+                seg = np.pad(seg, (0, need - len(seg)))
+            seg = seg.astype(np.float32).copy()
 
-            # Save tail for next crossfade
-            if len(converted) > self.overlap_samples:
-                self.prev_tail = converted[-self.overlap_samples:].copy()
-                output = converted[:len(converted) - self.overlap_samples]
-            else:
-                self.prev_tail = None
-                output = converted
+            # Short join with the previous block. Both sides of this seam were
+            # generated from the same real audio with the same real context, so
+            # unlike the old 500ms crossfade of two independently-padded chunks
+            # they are near-duplicates and blend without combing.
+            if self.prev_lap is not None and self.lap_samples > 0:
+                seg[:self.lap_samples] = (
+                    seg[:self.lap_samples] * self.lap_in
+                    + self.prev_lap * self.lap_out
+                )
+            self.prev_lap = seg[self.emit_samples:need].copy()
+            output = seg[:self.emit_samples]
 
-            # Match output to stride length
-            target_len = self.stride_samples
-            if len(output) > target_len:
-                output = output[:target_len]
-            elif len(output) < target_len:
-                output = np.pad(output, (0, target_len - len(output)))
-
-            # Silence output where the INPUT had no speech — removes RVC's
-            # hallucinated noise at pause boundaries without touching speech.
+            # Silence output where the INPUT had no speech — removes the noise RVC
+            # hallucinates in pauses. Keyed to the clean input, now exactly aligned
+            # with the emitted block.
             if self.gate_enabled:
-                output = self._gate_to_input(output, chunk[:len(output)])
-
-            # If the converted chunk is essentially silent, emit silence (keeps the
-            # timeline aligned) rather than dropping it (which compressed time).
-            chunk_rms = np.sqrt(np.mean(output ** 2))
-            if chunk_rms < 0.01:
-                return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
+                output = self._gate_to_input(output, emit_in)
 
             return output.astype(np.float32).tobytes()
 
         except Exception as e:
             print(f"[StreamProcessor] Conversion error: {e}")
-            # Keep the timeline even on error — emit silence for this stride.
-            return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
+            # Keep the timeline even on error — emit silence for this block.
+            return np.zeros(self.emit_samples, dtype=np.float32).tobytes()
 
     def get_latency_ms(self):
-        return self.chunk_sec * 1000
+        return (self.emit_sec + self.look_sec) * 1000
