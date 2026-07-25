@@ -108,6 +108,8 @@
         <div class="stat"><div class="value" id="latencyValue">—</div><div class="label">Latency</div></div>
         <div class="stat"><div class="value" id="framesValue">0</div><div class="label">Chunks</div></div>
         <div class="stat"><div class="value" id="underrunValue">0</div><div class="label">Breaks</div></div>
+        <div class="stat"><div class="value" id="syncValue">—</div><div class="label">Sync (want 1.000)</div></div>
+        <div class="stat"><div class="value" id="ratesValue">—</div><div class="label">Rates in/out</div></div>
       </div>
       <div class="note" style="margin-top:16px">Use headphones to avoid echo feedback</div>
     </div>
@@ -122,6 +124,11 @@ let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // scheduler with silence to play. Trades this much delay for not breaking up.
 const PLAY_BUFFER=0.25;
 let underruns=0, starveTotal=0;
+// Audio seconds received vs wall seconds elapsed. Must sit at ~1.00. Below 1.00 the
+// server is producing less audio than real time (playback will starve); above 1.00
+// it is producing more (delay will pile up). This is the one number that separates
+// a speed/sample-rate fault from a conversion-quality complaint.
+let audioSecs=0, firstBlockAt=0;
 let trainPoll=null, chunkCount=0, pitchMode='auto', currentTrainVoice=null;
 
 // === Upload ===
@@ -282,7 +289,14 @@ async function startConversion(){
 
     ws.onopen=()=>{
       const pitchVal = pitchMode==='auto' ? 'auto' : parseInt(document.getElementById('pitchSlider').value);
-      ws.send(JSON.stringify({voice:selectedVoice,pitch_shift:pitchVal,sample_rate:48000}));
+      // Send the rate the mic is ACTUALLY running at. This was hardcoded to 48000
+      // while the browser is free to ignore the requested sampleRate. If capture
+      // really runs at e.g. 44100 and the server is told 48000, the server treats
+      // the samples as covering less time than they do, so the converted audio
+      // comes out fast and the browser consumes it faster than it is produced —
+      // which drains the queue and opens gaps that get worse the longer you talk.
+      ws.send(JSON.stringify({voice:selectedVoice,pitch_shift:pitchVal,
+                              sample_rate:captureCtx.sampleRate}));
       ready=true;
       if(pitchMode==='auto') document.getElementById('pitchValue').textContent='detecting...';
     };
@@ -308,7 +322,9 @@ async function startConversion(){
       }
       chunkCount++;
       const f32=new Float32Array(ev.data); if(!f32.length)return;
-      const buf=playCtx.createBuffer(1,f32.length,48000);
+      // Use the context's real rate, not a hardcoded 48000: if they differ the
+      // audio is played at the wrong speed and the queue drains.
+      const buf=playCtx.createBuffer(1,f32.length,playCtx.sampleRate);
       buf.getChannelData(0).set(f32);
       const s=playCtx.createBufferSource(); s.buffer=buf;
       s.connect(playCtx.destination);
@@ -327,6 +343,15 @@ async function startConversion(){
       s.start(nextPlayTime); nextPlayTime+=buf.duration;
       const el=document.getElementById('underrunValue');
       if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
+
+      if(!firstBlockAt) firstBlockAt=performance.now();
+      audioSecs+=buf.duration;
+      const wall=(performance.now()-firstBlockAt)/1000;
+      const sy=document.getElementById('syncValue');
+      if(sy&&wall>2) sy.textContent=(audioSecs/wall).toFixed(3);
+      const rt=document.getElementById('ratesValue');
+      if(rt) rt.textContent=Math.round(captureCtx.sampleRate/1000)+'/'+
+                            Math.round(playCtx.sampleRate/1000)+'k';
       document.getElementById('framesValue').textContent=chunkCount;
     };
 
