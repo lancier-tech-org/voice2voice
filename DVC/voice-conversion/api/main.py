@@ -114,17 +114,16 @@ async def ab_page():
         stem = n[3:-4]
         if "input" in stem:
             label = "YOUR VOICE — unconverted, for reference"
-        elif stem.startswith("13_NEW"):
-            label = ("<b>NEW &mdash; index 0.2</b> &nbsp;<i>(now deployed: clearest "
-                     "words, but least of the target's timbre)</i>")
-        elif stem.startswith("14_NEW"):
-            label = ("NEW &mdash; index 0.75 &nbsp;<i>(most target timbre, words less "
-                     "clear &mdash; the old retrieval setting)</i>")
-        elif stem.startswith("15_NEW"):
-            label = ("NEW &mdash; index 0.0 &nbsp;<i>(no retrieval at all)</i>")
-        elif "LIVEFIX" in stem:
-            label = (f"LIVE with real context, {stem.split('_')[-1]} semitones "
-                     f"&nbsp;<i>(previous step, 0.5s lookahead)</i>")
+        elif stem.startswith("40_"):
+            label = "1. YOUR VOICE &mdash; the mic input from your 12:30 session"
+        elif stem.startswith("41_"):
+            label = ("<b>2. WHAT YOU ACTUALLY HEARD</b> &nbsp;<i>(your live output, saved "
+                     "server-side during that session)</i>")
+        elif stem.startswith("42_"):
+            label = ("3. SAME AUDIO, converted OFFLINE in one call &nbsp;<i>(no chunking "
+                     "&mdash; the ceiling)</i>")
+        elif stem.startswith("43_"):
+            label = ("4. SAME AUDIO through the LIVE path on current code")
         elif "LIVE" in stem:
             label = (f"LIVE streaming path, {stem.split('_')[-1]} semitones "
                      f"&nbsp;<i>(real-time, old bare-chunk path)</i>")
@@ -137,41 +136,27 @@ async def ab_page():
             f'style="width:100%;max-width:640px"></audio>'
         )
     return HTMLResponse(
-        "<html><head><title>Pitch-shift ladder</title>"
+        "<html><head><title>Where is the disturbance?</title>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:system-ui;margin:24px;max-width:720px;line-height:1.5}"
-        "h3{margin:22px 0 6px;font-size:1rem}"
-        "table{border-collapse:collapse;margin:12px 0}td,th{border:1px solid #ccc;"
-        "padding:4px 10px;text-align:left;font-size:.9rem}</style></head><body>"
-        "<h2>How far down can the pitch go before it falls apart?</h2>"
-        "<p>Same 16s of your speech, same voice model. The only variable is how many "
-        "semitones the pitch is shifted down. <b>-13</b> is deployed; <b>0</b> is no "
-        "shift.</p>"
-        "<p><b>Two kinds of clip:</b> <i>offline whole-file</i> = converted in one "
-        "call, no chunking — the best this model can do. <i>LIVE streaming path</i> = "
-        "the actual real-time pipeline at the same pitch. Compare the two at the same "
-        "number to hear what real-time costs you.</p>"
-        "<table><tr><th>shift</th><th>offline</th><th>live</th></tr>"
-        "<tr><td>-7</td><td>0.549</td><td>0.593</td></tr>"
-        "<tr><td>-9</td><td>0.532</td><td>0.587</td></tr>"
-        "<tr><td>-13</td><td>0.478</td><td>0.490</td></tr></table>"
-        "<p>(periodicity = how much harmonic structure survives; your own voice is "
-        "0.68. Real-time is not costing it — the pitch shift is.)</p>"
-        "<hr><h3 style='margin-top:20px'>Pronunciation fix &mdash; all at -13</h3>"
-        "<p>Pitch stays -13 (correct for f&rarr;m). Content similarity to your spoken "
-        "words, measured with HuBERT &mdash; the model RVC itself uses to represent "
-        "phonetic content. Offline whole-file is the ceiling at <b>0.891</b>.</p>"
-        "<table><tr><th>version</th><th>content</th><th>worst 10%</th></tr>"
-        "<tr><td>old bare-chunk live</td><td>0.802</td><td>0.640</td></tr>"
-        "<tr><td>+ real context</td><td>0.827</td><td>0.665</td></tr>"
-        "<tr><td><b>+ index 0.2, 1.0s lookahead</b></td><td><b>0.849</b></td>"
-        "<td><b>0.744</b></td></tr>"
-        "<tr><td>offline (ceiling)</td><td>0.891</td><td>&mdash;</td></tr></table>"
-        "<p><b>The one thing to decide by ear:</b> lowering retrieval from 0.75 to 0.2 "
-        "is what makes the words clearer, but retrieval is also what carries the "
-        "target's timbre. Compare <b>index 0.2</b> against <b>index 0.75</b> below and "
-        "tell me if it still sounds enough like the target voice. If it does not, "
-        "0.75 goes back and we keep only the context and lookahead gains.</p>"
+        "h3{margin:22px 0 6px;font-size:1rem}</style></head><body>"
+        "<h2>Where is the disturbance?</h2>"
+        "<p>All four are the SAME 16 seconds of your speech, voice <b>vamsi</b> at "
+        "<b>-12</b> &mdash; the voice and pitch your live session actually used.</p>"
+        "<p><b>2</b> is your real live output, recorded server-side while you were "
+        "speaking, so it is literally what came out of your speakers. <b>3</b> is that "
+        "same audio converted in one call with no chunking at all. <b>4</b> is the live "
+        "path on the code running now.</p>"
+        "<p><b>What to tell me:</b></p>"
+        "<ul><li>Is the disturbance in <b>2</b>? Then it is in the audio, and comparing "
+        "2 with 4 says whether the current code already fixed it.</li>"
+        "<li>Is <b>3</b> clean while <b>2</b> and <b>4</b> are not? Then it is the "
+        "streaming, and I keep working on the live path.</li>"
+        "<li>Are <b>3</b> and <b>4</b> both disturbed? Then it is the model or the -12 "
+        "shift, and no amount of streaming work will help.</li>"
+        "<li>Are they ALL clean to you? Then the disturbance is added after the server "
+        "&mdash; browser or network &mdash; and the Breaks/Sync numbers on the main page "
+        "are what I need.</li></ul>"
         + "".join(rows) + "</body></html>"
     )
 
