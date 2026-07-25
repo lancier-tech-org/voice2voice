@@ -62,8 +62,30 @@ class StreamProcessor:
         # 0.12 -> 0.027 (spikes killed) with only ~1.3% speech change. Higher (0.008+)
         # starts cutting quiet speech; lower (0.002) barely helps.
         self.gate_enabled = True
-        self.gate_threshold = 0.0040
+        self.gate_threshold = 0.0040   # legacy fixed value, kept for reference only
         self._gate_prev = 1.0
+
+        # ADAPTIVE gate threshold.
+        #
+        # A single absolute threshold cannot work here: across the user's own
+        # recordings the input peak spans 0.036 to 0.954 — a 26x range — because
+        # autoGainControl is off in the browser. 0.0040 was calibrated against a
+        # recording whose median speech frame was 0.0148; on a quiet one whose median
+        # speech frame is 0.0051 it sat ABOVE most of the speech and deleted it.
+        # Measured speech loss with the fixed threshold: 11.2% / 17.7% / 70.4% on
+        # three quiet recordings. That is the "words suddenly not playing", and as a
+        # speaker tires and drops in level it also explains the output growing
+        # quieter and gappier over a long session.
+        #
+        # So track this speaker's own noise floor and speech level and place the
+        # threshold between them (geometric mean, biased toward keeping speech).
+        # Both estimates are slow EMAs, so it follows a drifting mic level instead of
+        # progressively deleting more speech.
+        self.gate_adaptive = True
+        self.gate_bias = 0.6        # <1 favours keeping speech over killing noise
+        self.gate_abs_floor = 0.0008
+        self._noise_est = None
+        self._speech_est = None
 
     def start(self, voice_path, pitch_shift=0, input_sr=48000):
         self.converter.load_voice(voice_path)
@@ -83,6 +105,8 @@ class StreamProcessor:
         self.pos = 0
         self.prev_lap = None
         self._gate_prev = 1.0
+        self._noise_est = None
+        self._speech_est = None
         self.is_active = True
 
         self.lap_in = np.linspace(0, 1, self.lap_samples, dtype=np.float32)
@@ -129,6 +153,39 @@ class StreamProcessor:
 
         return result
 
+    def _level_threshold(self, env):
+        """
+        Threshold separating this speaker's speech from their own silence.
+
+        Placed at the geometric mean of the tracked noise floor and speech level,
+        biased below it, so it adapts to a 26x spread in input level instead of
+        deleting speech on quiet input. Slow EMAs so a drifting mic level is
+        followed rather than accumulating loss.
+        """
+        if not self.gate_adaptive:
+            return self.gate_threshold
+        lo = float(np.percentile(env, 10))
+        hi = float(np.percentile(env, 90))
+        if self._noise_est is None:
+            self._noise_est, self._speech_est = lo, hi
+        else:
+            # ASYMMETRIC on purpose. A symmetric EMA of each block's 10th percentile
+            # is wrong: in a block that is entirely speech that percentile IS speech
+            # level, so the "noise floor" climbs and the threshold starts cutting
+            # words — measured as speech loss rising 0.17% -> 3.02% on in_105612.
+            # So the noise floor follows evidence of quiet quickly but rises only
+            # very slowly, and the speech level does the reverse.
+            self._noise_est = (0.7 * self._noise_est + 0.3 * lo) if lo < self._noise_est \
+                else (0.995 * self._noise_est + 0.005 * lo)
+            self._speech_est = (0.7 * self._speech_est + 0.3 * hi) if hi > self._speech_est \
+                else (0.99 * self._speech_est + 0.01 * hi)
+        thr = self.gate_bias * float(np.sqrt(
+            max(self._noise_est, 1e-9) * max(self._speech_est, 1e-9)))
+        # Never above half the speech level (that would cut speech), never below the
+        # absolute floor (that would gate nothing at all).
+        thr = min(thr, 0.5 * self._speech_est)
+        return max(thr, self.gate_abs_floor)
+
     def _gate_to_input(self, output, ref):
         """
         Silence `output` wherever the clean input `ref` has no speech.
@@ -148,7 +205,7 @@ class StreamProcessor:
         frame = max(1, int(0.02 * self.input_sr))
         nf = max(1, n // frame)
         env = np.sqrt(np.mean(ref[:nf * frame].reshape(nf, frame) ** 2, axis=1))
-        gate = (env > self.gate_threshold).astype(np.float32)
+        gate = (env > self._level_threshold(env)).astype(np.float32)
 
         xf = (np.arange(nf) + 0.5) * frame
         smooth = np.interp(
@@ -186,7 +243,16 @@ class StreamProcessor:
 
         # VAD on the EMITTED region only — a pause inside the context margins must
         # not suppress a block that does contain speech.
-        if np.sqrt(np.mean(emit_in ** 2)) <= self.vad_threshold:
+        #
+        # Decided on the LOUDEST 20ms frame, not the block average: a short quiet word
+        # surrounded by silence averages below any sensible threshold, and averaging
+        # would drop the whole 1s block and with it the word. The only job here is
+        # "does this block contain any speech at all" — _gate_to_input handles
+        # silencing the non-speech parts within it.
+        _f = max(1, int(0.02 * self.input_sr))
+        _n = max(1, len(emit_in) // _f)
+        _env = np.sqrt(np.mean(emit_in[:_n * _f].reshape(_n, _f) ** 2, axis=1))
+        if float(_env.max()) <= self.vad_threshold:
             self.prev_lap = None
             # Silence in place, never a dropped block: dropping consumed input but
             # sent nothing, so the browser played the rest back-to-back and the
