@@ -43,7 +43,14 @@ class RVCConverter:
         # RVC inference parameters
         self.f0_up_key = 0       # Pitch shift in semitones
         self.f0_method = "rmvpe"  # Best pitch extraction
-        self.index_rate = 0.75    # How much to use index (timbre accuracy)
+        # Retrieval strength. 0.75 pulled features hard toward the target's training
+        # set and smeared phonetic detail: measured HuBERT content similarity to the
+        # spoken input rises 0.779 -> 0.815 (worst 10% of frames 0.649 -> 0.706) when
+        # this drops to 0.2, i.e. noticeably more of the actual words survive.
+        # TRADEOFF: less retrieval also means less of the target's timbre, so this is
+        # a clarity-vs-voice-identity dial, not a free win. 0.2 rather than 0.0
+        # because 0.0 scored no better on the mean and gives up all retrieval.
+        self.index_rate = 0.2     # How much to use index (timbre accuracy)
         self.filter_radius = 3    # Smoothing
         self.resample_sr = 0      # 0 = don't resample
         self.rms_mix_rate = 0.25  # Volume envelope mixing

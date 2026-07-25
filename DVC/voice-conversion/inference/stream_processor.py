@@ -31,9 +31,17 @@ class StreamProcessor:
         # fabricated audio.
         #
         # Latency is emit + lookahead = 1.5s, the same as the old 1.5s chunk buffer.
+        # Sizes chosen by measuring HuBERT content similarity against the input —
+        # i.e. "are the words still the spoken words" — which is the one thing the
+        # roughness/level metrics are blind to. Measured on a 16s dense-speech
+        # excerpt plus two longer recordings:
+        #   hist 2.0 HURTS (0.799 vs 0.827) — more past context is not better
+        #   look 1.0 helps, most of all on the worst 10% of frames (the garbled words)
+        #   emit 0.5 hurts, confirming the earlier "smaller blocks are worse" result
         self.hist_sec = 1.0     # real past context (free — already buffered)
-        self.emit_sec = 1.0     # block actually sent (unchanged: smaller measured worse)
-        self.look_sec = 0.5     # real future context
+        self.emit_sec = 1.0     # block actually sent (smaller measured worse)
+        self.look_sec = 1.0     # real future context — costs 0.5s of latency, buys
+                                # worst-10% content 0.649 -> 0.706
         self.lap_sec = 0.010    # short join between consecutive blocks
         self.pos = 0
         self.prev_lap = None

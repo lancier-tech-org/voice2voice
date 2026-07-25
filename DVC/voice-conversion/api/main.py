@@ -107,9 +107,17 @@ async def ab_page():
         stem = n[3:-4]
         if "input" in stem:
             label = "YOUR VOICE — unconverted, for reference"
+        elif stem.startswith("13_NEW"):
+            label = ("<b>NEW &mdash; index 0.2</b> &nbsp;<i>(now deployed: clearest "
+                     "words, but least of the target's timbre)</i>")
+        elif stem.startswith("14_NEW"):
+            label = ("NEW &mdash; index 0.75 &nbsp;<i>(most target timbre, words less "
+                     "clear &mdash; the old retrieval setting)</i>")
+        elif stem.startswith("15_NEW"):
+            label = ("NEW &mdash; index 0.0 &nbsp;<i>(no retrieval at all)</i>")
         elif "LIVEFIX" in stem:
-            label = (f"<b>LIVE with real context, {stem.split('_')[-1]} semitones</b> "
-                     f"&nbsp;<i>(the new fix — compare against the two below)</i>")
+            label = (f"LIVE with real context, {stem.split('_')[-1]} semitones "
+                     f"&nbsp;<i>(previous step, 0.5s lookahead)</i>")
         elif "LIVE" in stem:
             label = (f"LIVE streaming path, {stem.split('_')[-1]} semitones "
                      f"&nbsp;<i>(real-time, old bare-chunk path)</i>")
@@ -142,13 +150,21 @@ async def ab_page():
         "<tr><td>-13</td><td>0.478</td><td>0.490</td></tr></table>"
         "<p>(periodicity = how much harmonic structure survives; your own voice is "
         "0.68. Real-time is not costing it — the pitch shift is.)</p>"
-        "<hr><h3 style='margin-top:20px'>The live fix, at -13</h3>"
-        "<p>Pitch stays at -13 (correct for f&rarr;m). Three clips to compare at that "
-        "same pitch: <b>LIVE with real context</b> (the fix), <b>LIVE streaming path</b> "
-        "(what you have now), and <b>offline whole-file</b> (the ceiling). Measured: "
-        "speech lost to dropouts fell from 2.07% to 0.17%, pacing unchanged, but "
-        "smoothness metrics barely moved — whether the WORDS come out better is the "
-        "part no metric can see, so that is what to listen for.</p>"
+        "<hr><h3 style='margin-top:20px'>Pronunciation fix &mdash; all at -13</h3>"
+        "<p>Pitch stays -13 (correct for f&rarr;m). Content similarity to your spoken "
+        "words, measured with HuBERT &mdash; the model RVC itself uses to represent "
+        "phonetic content. Offline whole-file is the ceiling at <b>0.891</b>.</p>"
+        "<table><tr><th>version</th><th>content</th><th>worst 10%</th></tr>"
+        "<tr><td>old bare-chunk live</td><td>0.802</td><td>0.640</td></tr>"
+        "<tr><td>+ real context</td><td>0.827</td><td>0.665</td></tr>"
+        "<tr><td><b>+ index 0.2, 1.0s lookahead</b></td><td><b>0.849</b></td>"
+        "<td><b>0.744</b></td></tr>"
+        "<tr><td>offline (ceiling)</td><td>0.891</td><td>&mdash;</td></tr></table>"
+        "<p><b>The one thing to decide by ear:</b> lowering retrieval from 0.75 to 0.2 "
+        "is what makes the words clearer, but retrieval is also what carries the "
+        "target's timbre. Compare <b>index 0.2</b> against <b>index 0.75</b> below and "
+        "tell me if it still sounds enough like the target voice. If it does not, "
+        "0.75 goes back and we keep only the context and lookahead gains.</p>"
         + "".join(rows) + "</body></html>"
     )
 
