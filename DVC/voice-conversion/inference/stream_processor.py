@@ -40,8 +40,12 @@ class StreamProcessor:
         #   emit 0.5 hurts, confirming the earlier "smaller blocks are worse" result
         self.hist_sec = 1.0     # real past context (free — already buffered)
         self.emit_sec = 1.0     # block actually sent (smaller measured worse)
-        self.look_sec = 1.0     # real future context — costs 0.5s of latency, buys
-                                # worst-10% content 0.649 -> 0.706
+        # Was tried at 1.0: better content on paper, but it pushed latency to 2.0s AND
+        # made the inference tail far worse (p95 327->462ms, worst call 1354->3900ms
+        # against a 1.0s budget). Since inference runs on the event loop, a spike that
+        # long stalls sending entirely — the user heard exactly that as breaks during
+        # long speech. Back to 0.5s: latency 1.5s, and a much shorter tail.
+        self.look_sec = 0.5     # real future context
         self.lap_sec = 0.010    # short join between consecutive blocks
         self.pos = 0
         self.prev_lap = None

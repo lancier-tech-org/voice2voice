@@ -60,6 +60,13 @@ async def startup():
         try:
             state.converter.load_models()
             print("[Startup] RVC engine ready.")
+            # Load and warm one voice now, so the cost is paid here rather than by
+            # the user. Cold warm-up measured ~12s (CUDA autotuning, rmvpe load) and
+            # ~1s once the engine has run; without this it landed on session start.
+            voices = state.converter.list_voices()
+            if voices:
+                state.converter.load_voice(voices[0]["path"])
+                print(f"[Startup] Warmed on '{voices[0]['name']}'.")
         except Exception as e:
             print(f"[Startup] Warning: {e}")
             print("[Startup] RVC will initialize on first use.")

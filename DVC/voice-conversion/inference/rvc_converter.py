@@ -11,6 +11,7 @@ This module wraps RVC's VC class for our streaming pipeline.
 
 import os
 import sys
+import time
 import numpy as np
 import soundfile as sf
 import librosa
@@ -118,6 +119,27 @@ class RVCConverter:
         self._index_path = index_path
         print(f"[RVCConverter] Voice loaded: {self.current_voice_name}"
               f"{' (with index)' if index_path else ''}")
+        self._warm_up()
+
+    def _warm_up(self):
+        """
+        Run one throwaway conversion so the first REAL one is not slow.
+
+        Measured: call 0 takes ~3900ms (CUDA kernel autotuning, lazy allocation)
+        while calls 1..119 are a steady 268-284ms. Unwarmed, that ~3.6s stall lands
+        on the first block of a session and is heard as a break right as the user
+        starts speaking — and with conversion on a worker thread the socket stays
+        responsive but the audio still is not there. Cheap to pay once at load time.
+        """
+        try:
+            t0 = time.perf_counter()
+            dummy = (0.01 * np.sin(
+                2 * np.pi * 220 * np.arange(int(0.5 * 48000)) / 48000
+            )).astype(np.float32)
+            self.convert(dummy, sr=48000, pitch_shift=0)
+            print(f"[RVCConverter] Warm-up: {(time.perf_counter()-t0)*1000:.0f}ms")
+        except Exception as e:
+            print(f"[RVCConverter] Warm-up skipped: {e}")
 
     def convert(self, audio: np.ndarray, sr: int = 48000,
                 pitch_shift: float = 0) -> np.ndarray:

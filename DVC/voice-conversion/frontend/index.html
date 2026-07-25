@@ -107,6 +107,7 @@
       <div class="stats" id="statsArea" style="display:none">
         <div class="stat"><div class="value" id="latencyValue">—</div><div class="label">Latency</div></div>
         <div class="stat"><div class="value" id="framesValue">0</div><div class="label">Chunks</div></div>
+        <div class="stat"><div class="value" id="underrunValue">0</div><div class="label">Breaks</div></div>
       </div>
       <div class="note" style="margin-top:16px">Use headphones to avoid echo feedback</div>
     </div>
@@ -117,6 +118,10 @@
 const API=location.origin, WS_PROTO=(location.protocol==="https:"?"wss:":"ws:"), WS_URL=`${WS_PROTO}//${location.host}/api/convert/stream`;
 let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
+// Seconds of playback held in reserve so a late converted block does not leave the
+// scheduler with silence to play. Trades this much delay for not breaking up.
+const PLAY_BUFFER=0.25;
+let underruns=0, starveTotal=0;
 let trainPoll=null, chunkCount=0, pitchMode='auto', currentTrainVoice=null;
 
 // === Upload ===
@@ -308,8 +313,20 @@ async function startConversion(){
       const s=playCtx.createBufferSource(); s.buffer=buf;
       s.connect(playCtx.destination);
       const now=playCtx.currentTime;
-      if(nextPlayTime<=now) nextPlayTime=now+0.02;
+      // Jitter buffer. Was 0.02s, which could not absorb even a small hiccup:
+      // conversion tail latency reaches several hundred ms, so a late block left
+      // the scheduler with nothing to play and inserted an audible break. Every
+      // such underrun also re-anchored the timeline, so breaks kept recurring.
+      // 0.25s costs a quarter second of delay and absorbs the measured p95.
+      //
+      // Count underruns rather than hiding them: a break the listener hears is
+      // exactly the moment this scheduler had nothing queued. Server-side tests
+      // cannot see the user's network, so this is the only honest source of truth.
+      if(nextPlayTime<=now){ underruns++; starveTotal+=(now-nextPlayTime); }
+      if(nextPlayTime<=now+PLAY_BUFFER) nextPlayTime=now+PLAY_BUFFER;
       s.start(nextPlayTime); nextPlayTime+=buf.duration;
+      const el=document.getElementById('underrunValue');
+      if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
       document.getElementById('framesValue').textContent=chunkCount;
     };
 

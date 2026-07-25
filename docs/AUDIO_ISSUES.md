@@ -18,8 +18,9 @@ Two categories:
 | 4 | Amplitude pumping / noise floor breathes | `rvc_converter.convert()` peak-normalizes EACH chunk to 0.95 → gain differs per chunk | ISOLATED | **FIXED 2026-07-25** (commit `d735c45`). Level fixed on the OUTPUT, not the input: converted RMS rescaled to 3.5x the input chunk's RMS. Input normalization kept — reducing input drive measurably raised roughness. Level step p95 5.3→2.1 / 8.1→4.9 / 10.0→3.0 dB on three recordings; per-frame roughness and spectrum unchanged; pacing and pause silence unchanged | low |
 | 5 | ~11% of speech lost, words jammed together | `stream_processor` VAD returns None on chunks it judges silent → never sent → browser plays rest back-to-back (measured 30.0 s out for 33.7 s in) | ISOLATED | Silence in place instead of dropping (keep timeline) — must NOT over-gate | low-med |
 | 6 | Background noise during pauses | RVC hallucinates sound with no speech input (input was ~39% silence) | ISOLATED | Correctly-calibrated input-keyed gate. CAUTION: a prior gate at 0.006 silenced ~21% of real speech (median frame 0.0057). Threshold must sit ~3x noise floor (~0.0015), below quietest speech | med (broke things before) |
-| 7 | Bursty output / breaks in continuous speech | GPU inference runs ON the asyncio event loop (not executor); during ~290 ms conversion the server can't send/recv → bursts, worse on slow GPU | ISOLATED | Run conversion in a worker thread (run_in_executor) | low |
-| 8 | Gaps / underruns in playback | Browser schedules only 20 ms ahead (`nextPlayTime`), so uneven arrival underruns | ISOLATED | Larger jitter buffer (trade a little latency for smoothness) | low (frontend) |
+| 7 | Bursty output / breaks in continuous speech | GPU inference ran ON the asyncio event loop; during conversion the server could neither send nor recv | ISOLATED | **FIXED 2026-07-25** — single-worker ThreadPoolExecutor (one worker, so blocks cannot overtake each other and GPU access stays serialized). Had to ship WITH #8 | low |
+| 8 | Gaps / underruns in playback | Browser scheduled only 20 ms ahead, which cannot absorb a p95 arrival spread of ~330 ms | ISOLATED | **FIXED 2026-07-25** — 250 ms jitter buffer, plus an underrun counter shown in the UI so the user's own session reports breaks. On a 220 s recording, starvation 978 ms → 383 ms | low (frontend) |
+| 10 | ~4 s stall on the FIRST conversion of a session | CUDA autotuning/lazy alloc: call 0 measured 3929 ms, calls 1-119 a steady 268-284 ms | ISOLATED | **FIXED 2026-07-25** — throwaway conversion at container startup (`_warm_up`), so the cost is paid before any user connects, not on their first words | low |
 | 9 | ~1.9 s latency | 1.5 s chunk buffering + ~0.29 s inference + playback buffer | STRUCTURAL-ish | Smaller emit block + context, or realtime engine (~300–500 ms floor) | high effort |
 
 ## Why SOLA failed, mechanistically (2026-07-25)
@@ -78,3 +79,24 @@ reported a spurious 67 % regression on the #4 fix. Real inputs are captured to
 `uploads/debug/in_*.wav` by the `dbg_on` path in `routes_convert.py`.
 
 Baseline to return to at any time: tag `audio-work-start` / `bash ~/RESTORE-KNOWN-GOOD.sh`.
+
+## Real-time measurement (2026-07-25) — the offline harness is not enough
+The offline replay harness runs as fast as the GPU allows, so it is **structurally
+blind** to real-time failures: it cannot see that a call occasionally overruns its
+budget while blocking the event loop. Use `rt_client.py`, which streams a recording
+over the real websocket at exactly 1x and simulates the browser's scheduler to
+report *starvation* — the moments playback would have had nothing to play. That is
+the metric that corresponds to "breaks".
+
+## Content preservation — the metric for "are these the words I said"
+Roughness/periodicity/level are all blind to pronunciation: a word converted with
+the wrong context is perfectly smooth and simply wrong. Use HuBERT feature cosine
+similarity between output and input (hubert_base.pt is already loaded for
+inference, so no new dependency). It ranks sensibly — offline whole-file 0.891 >
+context path 0.82 > old bare-chunk 0.802 — and it was the only metric that could
+see the context change working.
+
+**Run-to-run variance is ~±0.02** (CUDA nondeterminism). Differences smaller than
+that are noise: a single run made a 1.0s lookahead look like a clear win, and on
+repeats it was indistinguishable from 0.5s. Always repeat before believing a knob.
+Reproducible so far: `index_rate` 0.75 → 0.2 is worth about +0.02 consistently.

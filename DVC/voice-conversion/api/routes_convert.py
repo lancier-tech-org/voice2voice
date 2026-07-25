@@ -3,8 +3,11 @@ Real-time voice conversion WebSocket — RVC backend.
 Includes auto pitch detection for cross-gender conversion.
 """
 
+import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -12,6 +15,16 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import config
 
 router = APIRouter()
+
+# Conversion must not run on the asyncio event loop. Inference takes ~290ms median
+# but the tail reaches well over a second, and while it runs on the loop the server
+# can neither receive mic packets nor send converted audio — which is heard as a
+# break during continuous speech, and gets worse the longer you talk because there
+# are more chances to hit a spike.
+#
+# ONE worker, deliberately: blocks must be emitted in order, and a second worker
+# would let block N+1 overtake block N. One worker also keeps GPU access serialized.
+_infer_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rvc-infer")
 
 
 def detect_median_f0(audio_np, sr=48000):
@@ -248,7 +261,12 @@ async def stream_convert(websocket: WebSocket):
                     dbg_in.append(np.frombuffer(audio_bytes, dtype=np.float32).copy())
 
                 t_start = time.perf_counter()
-                output_bytes = processor.process(audio_bytes)
+                # Off the event loop (see _infer_pool). The await yields, so mic
+                # packets keep being received and finished blocks keep being sent
+                # even while a slow conversion is in flight.
+                output_bytes = await asyncio.get_running_loop().run_in_executor(
+                    _infer_pool, processor.process, audio_bytes
+                )
                 t_elapsed = (time.perf_counter() - t_start) * 1000
                 frame_count += 1
                 total_latency += t_elapsed
