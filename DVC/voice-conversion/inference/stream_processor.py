@@ -39,29 +39,6 @@ class StreamProcessor:
         self.gate_threshold = 0.0040
         self._gate_prev = 1.0
 
-        # Level correction on the OUTPUT.
-        #
-        # rvc_converter.convert() peak-normalizes every chunk to 0.95 before
-        # inference. That is good for the model (each chunk gets full input drive,
-        # so output SNR is as high as it can be — dropping the drive measurably
-        # increased roughness) but it destroys relative loudness: a quiet chunk is
-        # boosted up to 17x and a loud one only 2x, so the converted level jumped
-        # up to 9.1 dB between consecutive 1s chunks. That is the pumping /
-        # breathing noise floor, and a sudden 9 dB drop mid-sentence reads as a
-        # break in the speech.
-        #
-        # Fix: leave the input normalization alone, and rescale each converted
-        # chunk so its RMS is a FIXED multiple of the input chunk's RMS. The
-        # speaker's own dynamics are then reproduced faithfully and the chunk-to-
-        # chunk level steps go away, without giving up any input drive.
-        self.level_match = True
-        # 3.5 measured against two real recordings: flattest level of the values
-        # tried, and the highest that never engages the headroom limiter below
-        # (which would itself put an arbitrary per-chunk gain back in).
-        self.level_k = 3.5          # output RMS / input RMS, held constant
-        self.level_max_trim = 24.0  # ceiling on the correction factor
-        self.level_headroom = 0.95  # never let a corrected chunk clip
-
     def start(self, voice_path, pitch_shift=0, input_sr=48000):
         self.converter.load_voice(voice_path)
         self.pitch_shift = pitch_shift
@@ -188,32 +165,7 @@ class StreamProcessor:
                 chunk, sr=self.input_sr, pitch_shift=self.pitch_shift,
             )
             if converted is None or len(converted) == 0:
-                # Emit silence, never None: returning None sends nothing, so the
-                # browser plays the next stride early and the output drifts ahead
-                # of the speaker. Every path out of process() must be one stride.
-                return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
-
-            # Undo the per-chunk peak normalization's effect on level: rescale so
-            # the converted RMS is a fixed multiple of THIS chunk's input RMS.
-            # Applied before the crossfade, so prev_tail and the incoming head are
-            # already on the same scale when they are mixed.
-            if self.level_match:
-                # Measure over the region actually EMITTED (the leading stride),
-                # not the whole window: the trailing overlap is discarded, and when
-                # its level differs from the emitted part the correction lands wrong
-                # — that left a 9.2 dB residual step. The scalar is still applied to
-                # the whole array so prev_tail carries the same scale into the
-                # crossfade.
-                ns = min(self.stride_samples, len(converted))
-                in_rms = float(np.sqrt(np.mean(chunk[:ns] ** 2)))
-                out_rms = float(np.sqrt(np.mean(converted[:ns] ** 2)))
-                if in_rms > 1e-7 and out_rms > 1e-7:
-                    trim = min(self.level_max_trim,
-                               (self.level_k * in_rms) / out_rms)
-                    peak = float(np.abs(converted).max()) * trim
-                    if peak > self.level_headroom:
-                        trim *= self.level_headroom / peak
-                    converted = (converted * trim).astype(np.float32)
+                return None
 
             # Apply crossfade with previous chunk's tail
             if self.prev_tail is not None:
@@ -246,18 +198,8 @@ class StreamProcessor:
 
             # If the converted chunk is essentially silent, emit silence (keeps the
             # timeline aligned) rather than dropping it (which compressed time).
-            #
-            # Threshold is 0.001, not the old 0.01. This is a REQUIRED companion to
-            # the fixed session gain above, not a separate improvement: quiet speech
-            # used to be boosted up to 17x by per-chunk normalization, so it cleared
-            # 0.01 easily. Held at a steady gain it no longer does, and 0.01 over a
-            # whole second would now wipe entire quiet words. Pauses are already
-            # handled by _gate_to_input, which keys off the CLEAN INPUT and so
-            # cannot mistake quiet speech for silence; this check is only a
-            # backstop for genuinely dead output. Both branches return one stride,
-            # so pacing is identical either way.
             chunk_rms = np.sqrt(np.mean(output ** 2))
-            if chunk_rms < 0.001:
+            if chunk_rms < 0.01:
                 return np.zeros(self.stride_samples, dtype=np.float32).tobytes()
 
             return output.astype(np.float32).tobytes()
