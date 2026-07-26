@@ -107,7 +107,8 @@
       <div class="stats" id="statsArea" style="display:none">
         <div class="stat"><div class="value" id="latencyValue">—</div><div class="label">Latency</div></div>
         <div class="stat"><div class="value" id="framesValue">0</div><div class="label">Chunks</div></div>
-        <div class="stat"><div class="value" id="underrunValue">0</div><div class="label">Breaks</div></div>
+        <div class="stat"><div class="value" id="underrunValue">0 / 0</div><div class="label">Breaks / Catch-ups</div></div>
+        <div class="stat"><div class="value" id="leadValue">—</div><div class="label">Delay behind you</div></div>
         <div class="stat"><div class="value" id="syncValue">—</div><div class="label">Sync (want 1.000)</div></div>
         <div class="stat"><div class="value" id="ratesValue">—</div><div class="label">Rates in/out</div></div>
       </div>
@@ -123,7 +124,12 @@ let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // Seconds of playback held in reserve so a late converted block does not leave the
 // scheduler with silence to play. Trades this much delay for not breaking up.
 const PLAY_BUFFER=0.25;
-let underruns=0, starveTotal=0;
+// Hard ceiling on how far ahead of real time the playback queue may run, i.e. the
+// worst delay between speaking and hearing. Above this the backlog is discarded and
+// playback re-anchors to now. Must sit above one block (1.0s) plus normal jitter,
+// or it would re-anchor constantly during healthy playback.
+const MAX_LEAD=1.6;
+let underruns=0, starveTotal=0, catchups=0, pending=[];
 // Audio seconds received vs wall seconds elapsed. Must sit at ~1.00. Below 1.00 the
 // server is producing less audio than real time (playback will starve); above 1.00
 // it is producing more (delay will pile up). This is the one number that separates
@@ -276,6 +282,9 @@ async function startConversion(){
     mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
 
     playCtx=new AudioContext({sampleRate:48000}); await playCtx.resume(); nextPlayTime=0;
+    // Clear per-session playback state, or a previous session's queued sources and
+    // counters carry over into this one.
+    pending=[]; catchups=0; underruns=0; starveTotal=0; audioSecs=0; firstBlockAt=0;
     captureCtx=new AudioContext({sampleRate:48000}); await captureCtx.resume();
     const src=captureCtx.createMediaStreamSource(mediaStream);
     scriptProc=captureCtx.createScriptProcessor(4096,1,1);
@@ -340,9 +349,37 @@ async function startConversion(){
       // cannot see the user's network, so this is the only honest source of truth.
       if(nextPlayTime<=now){ underruns++; starveTotal+=(now-nextPlayTime); }
       if(nextPlayTime<=now+PLAY_BUFFER) nextPlayTime=now+PLAY_BUFFER;
-      s.start(nextPlayTime); nextPlayTime+=buf.duration;
+
+      // CAP THE QUEUE.
+      //
+      // The line above only ever pushes nextPlayTime FORWARD, so the delay between
+      // speaking and hearing could grow without limit and never recover. It grows
+      // because the server drains any backlog faster than real time: blocks were
+      // measured arriving <500ms apart, and each adds a full second to the queue
+      // while only a fraction of a second of wall time passes. Measured drift:
+      // ~1.0s behind at 10s into a session, ~4.4s by 30s. At that point what is
+      // playing no longer matches what is being said, which is heard as the voice
+      // cutting off part way through.
+      //
+      // So if the queue ever runs further ahead than MAX_LEAD, throw the backlog
+      // away and re-anchor to now. Already-scheduled sources MUST be stopped, not
+      // just forgotten -- they are queued inside the audio engine and would
+      // otherwise keep playing and overlap the re-anchored audio.
+      pending=pending.filter(p=>{ if(p.end<=now){return false;} return true; });
+      if(nextPlayTime-now>MAX_LEAD){
+        pending.forEach(p=>{ try{p.src.stop();}catch(e){} });
+        pending=[];
+        nextPlayTime=now+PLAY_BUFFER;
+        catchups++;
+      }
+
+      s.start(nextPlayTime);
+      pending.push({src:s,end:nextPlayTime+buf.duration});
+      nextPlayTime+=buf.duration;
       const el=document.getElementById('underrunValue');
-      if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
+      if(el) el.textContent=underruns+' / '+catchups;
+      const lg=document.getElementById('leadValue');
+      if(lg) lg.textContent=(nextPlayTime-now-buf.duration).toFixed(2)+'s';
 
       if(!firstBlockAt) firstBlockAt=performance.now();
       audioSecs+=buf.duration;
