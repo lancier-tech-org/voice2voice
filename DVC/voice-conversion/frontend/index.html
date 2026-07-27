@@ -124,7 +124,19 @@ let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // Seconds of playback held in reserve so a late converted block does not leave the
 // scheduler with silence to play. Trades this much delay for not breaking up.
-const PLAY_BUFFER=0.25;
+// How much playback is held in reserve, i.e. how late a block may arrive without
+// leaving the speakers with nothing to play.
+//
+// Sized against measurement, not taste. A live session reported net jitter of 347ms
+// (worst block arrival, minus the fastest, so it is clock-offset-proof) while this was
+// 250ms -- so the worst block landed ~100ms after playback needed it, and a 100ms
+// silence in the middle of a word is clearly audible. Browser stall in that same
+// session peaked at 15ms, so the main thread was never the problem; the variation is
+// in the network. 0.6s clears the measured 347ms with headroom.
+//
+// This is the honest trade: it costs ~350ms of extra delay to stop the breaks. One
+// line to change if the delay matters more.
+const PLAY_BUFFER=0.6;
 let underruns=0, starveTotal=0;
 // Diagnostics that separate a NETWORK stall from a BROWSER stall. Playback ran dry
 // twice for ~1s in a 27s session while the server measured completely clean, so the
@@ -371,8 +383,17 @@ async function startConversion(){
       // Count underruns rather than hiding them: a break the listener hears is
       // exactly the moment this scheduler had nothing queued. Server-side tests
       // cannot see the user's network, so this is the only honest source of truth.
-      if(nextPlayTime<=now){ underruns++; starveTotal+=(now-nextPlayTime); }
-      if(nextPlayTime<=now+PLAY_BUFFER) nextPlayTime=now+PLAY_BUFFER;
+      // The first block is NOT an underrun. nextPlayTime starts at 0 while the audio
+      // clock has already been running for a second or two, so the old check counted
+      // one enormous fake break at the start of every session -- reported as
+      // "1 (2120ms)" when the real starvation was near zero. Third instrumentation
+      // bug of this investigation; measure the measurement.
+      if(nextPlayTime===0){
+        nextPlayTime=now+PLAY_BUFFER;
+      }else{
+        if(nextPlayTime<=now){ underruns++; starveTotal+=(now-nextPlayTime); }
+        if(nextPlayTime<=now+PLAY_BUFFER) nextPlayTime=now+PLAY_BUFFER;
+      }
       s.start(nextPlayTime); nextPlayTime+=buf.duration;
       const el=document.getElementById('underrunValue');
       if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
