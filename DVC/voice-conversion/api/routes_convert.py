@@ -227,7 +227,18 @@ async def stream_convert(websocket: WebSocket):
                     continue
 
             if "bytes" in message:
-                audio_bytes = message["bytes"]
+                # WIRE FORMAT IS 16-BIT.
+                #
+                # 32-bit float cost 192 KB/s in EACH direction. Measured net jitter on
+                # the user's connection reached 467ms against a 250ms playback reserve,
+                # which is a ~200ms silence every time it spikes. 16-bit halves the
+                # bytes to ~96 KB/s each way, so there is half as much to be late with,
+                # and it costs nothing audible: 16-bit is ~96dB of dynamic range against
+                # speech that occupies maybe 40dB. Masking the jitter with a bigger
+                # reserve was tried and rejected because it adds delay; this attacks the
+                # cause instead. Everything downstream still works in float32.
+                audio_bytes = (np.frombuffer(message["bytes"], dtype=np.int16)
+                               .astype(np.float32) / 32768.0).tobytes()
 
                 # Auto pitch calibration from first ~2.5 seconds
                 if auto_pitch and not auto_pitch_calibrated and target_f0:
@@ -285,7 +296,11 @@ async def stream_convert(websocket: WebSocket):
                     # 4-byte aligned so the audio still reads as a Float32Array.
                     out_seq += 1
                     header = struct.pack("<Id", out_seq, time.time() * 1000.0)
-                    await websocket.send_bytes(header + output_bytes)
+                    # Down to 16-bit for the wire (see the input note above). The debug
+                    # recorder above keeps the full-precision float32.
+                    pcm16 = (np.frombuffer(output_bytes, dtype=np.float32) * 32767.0
+                             ).clip(-32768, 32767).astype(np.int16).tobytes()
+                    await websocket.send_bytes(header + pcm16)
 
                     if frame_count % 50 == 0:
                         avg_latency = total_latency / frame_count

@@ -357,9 +357,16 @@ async function startConversion(){
                 for(let i=0;i<ch.length;i++){
                   this.b[this.n++]=ch[i];
                   if(this.n===4096){
-                    const c=this.b.slice(0);
+                    // 16-bit on the wire: half the bytes, so half as much to be late
+                    // with when the connection hiccups. Converted here on the audio
+                    // thread, which keeps this work off the main thread entirely.
+                    const q=new Int16Array(4096);
+                    for(let k=0;k<4096;k++){
+                      let v=this.b[k]; if(v>1)v=1; else if(v<-1)v=-1;
+                      q[k]=v*32767;
+                    }
                     this.made=(this.made||0)+1;
-                    this.port.postMessage({b:c.buffer,made:this.made},[c.buffer]);
+                    this.port.postMessage({b:q.buffer,made:this.made},[q.buffer]);
                     this.n=0;
                   }
                 }
@@ -442,7 +449,10 @@ async function startConversion(){
       if(minTransit===null||transit<minTransit) minTransit=transit;
       netJitter=Math.max(netJitter,transit-minTransit);
 
-      const f32=new Float32Array(ev.data,12); if(!f32.length)return;
+      // Payload is 16-bit now (see the server note): decode to float for WebAudio.
+      const i16=new Int16Array(ev.data,12); if(!i16.length)return;
+      const f32=new Float32Array(i16.length);
+      for(let k=0;k<i16.length;k++) f32[k]=i16[k]/32768;
       // Use the context's real rate, not a hardcoded 48000: if they differ the
       // audio is played at the wrong speed and the queue drains.
       const buf=playCtx.createBuffer(1,f32.length,playCtx.sampleRate);
@@ -515,8 +525,11 @@ async function startConversion(){
       scriptProc.onaudioprocess=(e)=>{
         if(ws&&ready&&ws.readyState===1){
           const d=e.inputBuffer.getChannelData(0);
-          const c=new Float32Array(d.length); c.set(d);
-          ws.send(c.buffer); framesSent++;
+          const q=new Int16Array(d.length);
+          for(let k=0;k<d.length;k++){
+            let v=d[k]; if(v>1)v=1; else if(v<-1)v=-1; q[k]=v*32767;
+          }
+          ws.send(q.buffer); framesSent++;
         }
       };
     }
