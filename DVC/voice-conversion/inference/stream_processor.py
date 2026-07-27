@@ -69,6 +69,9 @@ class StreamProcessor:
 
         # VAD
         self.vad_threshold = 0.003
+        # How many 20ms frames must exceed the threshold before a block is converted
+        # at all. 1 = the old behaviour (any single spike converts the block).
+        self.vad_min_frames = 3
 
         # Output gate keyed to the CLEAN INPUT: silence output wherever the input
         # had no speech, to kill the noise RVC hallucinates at pause boundaries.
@@ -129,6 +132,15 @@ class StreamProcessor:
         # silent input always yields silent output regardless of how noisy the mic is.
         self.gate_noise_mult = 3.0
         self.gate_noise_down = 0.05
+        # Deep-silence mute: frames with no confidently-loud frame within +/- this many
+        # 20ms frames are muted outright, regardless of the per-frame threshold.
+        # TRIED and DISABLED (0). It cut the noise well (silent frames producing sound
+        # 55%->3%, 22%->10%, 5%->0%) but cost 5.7% to 48.9% of speech, because quiet
+        # words never reach the confidence threshold and get muted whole. Lowering the
+        # confidence level stops it rejecting noise. Left here with the numbers so it is
+        # not retried blindly.
+        self.deep_mute_win = 0        # +/-frames; 0 = off
+        self.deep_mute_conf = 2.5     # multiple of the threshold that counts as certain
         # A speech-relative floor was TRIED and DISABLED (0.0). It fixed the
         # silence-heavy recordings (094723 75%->5% of silent frames producing sound) but
         # destroyed 13-36% of speech on the user's normal sessions, because recordings
@@ -320,8 +332,30 @@ class StreamProcessor:
         frame = max(1, int(0.02 * self.input_sr))
         nf = max(1, n // frame)
         env = np.sqrt(np.mean(ref[:nf * frame].reshape(nf, frame) ** 2, axis=1))
-        gate = self._gate_decision(
-            env, self._level_threshold(env) if thr is None else thr)
+        t = self._level_threshold(env) if thr is None else thr
+        gate = self._gate_decision(env, t)
+
+        # DEEP-SILENCE MUTE.
+        #
+        # Frames sitting just above the threshold pass by design, and raising the
+        # threshold to catch them costs speech -- measured repeatedly. So instead of
+        # moving the threshold, use context: a frame with no CONFIDENTLY loud frame
+        # anywhere near it cannot be part of a word, so mute it outright.
+        #
+        # The test is two-sided, which is what makes it safe. A word onset is itself
+        # confident, and every frame within the window either side of it is protected,
+        # so neither onsets nor tails can be clipped. Unlike a release hold (tried and
+        # reverted -- it passed 100ms of hallucinated noise after every word), this
+        # removes noise on BOTH sides of speech.
+        if self.deep_mute_win > 0:
+            conf = env > self.deep_mute_conf * t
+            if conf.any():
+                near = np.convolve(conf.astype(np.float32),
+                                   np.ones(2 * self.deep_mute_win + 1,
+                                           dtype=np.float32), mode="same") > 0
+                gate = gate * near.astype(np.float32)
+            else:
+                gate = np.zeros_like(gate)
 
         xf = (np.arange(nf) + 0.5) * frame
         smooth = np.interp(
@@ -372,7 +406,13 @@ class StreamProcessor:
         _n = max(1, len(emit_in) // _f)
         _env = np.sqrt(np.mean(emit_in[:_n * _f].reshape(_n, _f) ** 2, axis=1))
         _thr = self._level_threshold(_env)
-        if float(_env.max()) <= max(_thr, self.gate_abs_floor):
+        # Decide on a COUNT of loud frames, not the single loudest one. A lone noise
+        # spike was enough to send an otherwise silent second through the model, which
+        # then hallucinated voice-like sound from it — heard as weird noises during
+        # deliberate silence. Real speech always produces many frames above threshold,
+        # never just one, so requiring a few is safe for speech and rejects noise.
+        _loud = int(np.sum(_env > max(_thr, self.gate_abs_floor)))
+        if _loud < self.vad_min_frames:
             self.prev_lap = None
             # Silence in place, never a dropped block: dropping consumed input but
             # sent nothing, so the browser played the rest back-to-back and the
