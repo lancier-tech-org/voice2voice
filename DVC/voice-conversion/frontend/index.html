@@ -134,9 +134,16 @@ let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // session peaked at 15ms, so the main thread was never the problem; the variation is
 // in the network. 0.6s clears the measured 347ms with headroom.
 //
-// This is the honest trade: it costs ~350ms of extra delay to stop the breaks. One
-// line to change if the delay matters more.
-const PLAY_BUFFER=0.6;
+// Tried at 0.6 and reverted: it did remove the starvation (Breaks 0, Sync 1.002, and
+// the captured input verified clean) but the user judged the result worse. A larger
+// reserve cannot alter audio CONTENT -- it only delays when a block starts playing --
+// so the change of impression was either the extra 350ms of delay itself or something
+// independent of this value. Back to 0.25 rather than argue with the ear.
+//
+// The trade, measured, if this needs revisiting:
+//   0.25s -> occasional ~100ms gaps whenever net jitter exceeds it (seen at 347ms)
+//   0.60s -> no gaps, ~350ms more delay
+const PLAY_BUFFER=0.25;
 let underruns=0, starveTotal=0;
 // Diagnostics that separate a NETWORK stall from a BROWSER stall. Playback ran dry
 // twice for ~1s in a 27s session while the server measured completely clean, so the
