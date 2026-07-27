@@ -56,6 +56,9 @@ class RVCConverter:
         self.resample_sr = 0      # 0 = don't resample
         self.rms_mix_rate = 0.25  # Volume envelope mixing
         self.protect = 0.33       # Protect voiceless consonants
+        # Ceiling on the peak-normalization gain (see convert()). Stops near-silent
+        # windows being amplified to full scale and hallucinated into speech.
+        self.max_input_gain = 10.0
 
     def load_models(self):
         """Initialize the RVC VC module."""
@@ -162,10 +165,22 @@ class RVCConverter:
         # Ensure mono float32
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
-        # Normalize
+        # Normalize -- but CAP the gain.
+        #
+        # Peak-normalizing to 0.95 unconditionally turns silence into a full-scale
+        # signal: during a pause the window holds only mic noise at ~0.001, so it was
+        # being amplified ~900x, and RVC then converted amplified hiss into loud
+        # voice-like sound. That is why the noise heard during silence is "weird" rather
+        # than just hissy -- it is the model hallucinating speech from magnified noise.
+        # The input gate removes most of it, but anything above its threshold arrives
+        # at full volume.
+        #
+        # A cap leaves genuinely quiet input quiet, so the model has nothing to invent
+        # from. It cannot affect normal speech: a window containing speech has a peak
+        # far above 0.95/MAX_INPUT_GAIN, so the cap never binds there.
         max_val = np.abs(audio).max()
         if max_val > 0:
-            audio = audio / max_val * 0.95
+            audio = audio * min(0.95 / max_val, self.max_input_gain)
         sf.write(tmp_path, audio, sr)
 
         try:
