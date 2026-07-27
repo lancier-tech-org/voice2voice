@@ -38,7 +38,24 @@ class StreamProcessor:
         #   hist 2.0 HURTS (0.799 vs 0.827) — more past context is not better
         #   look 1.0 helps, most of all on the worst 10% of frames (the garbled words)
         #   emit 0.5 hurts, confirming the earlier "smaller blocks are worse" result
-        self.hist_sec = 1.0     # real past context (free — already buffered)
+        # HISTORY = 4.0s, raised from 1.0s, and it is the fix for audio being "chopped
+        # mid way". Found by finally measuring the right thing: abrupt level drops per
+        # second, with offline whole-file conversion as the control.
+        #   your input (normalised)   1.30 drops/s   (natural: plosives, word gaps)
+        #   offline whole-file        0.00 drops/s   <- the model is NOT the problem
+        #   live, 1.0s history        2.59 drops/s
+        # Offline has ZERO, so the chopping is caused by converting short windows, not by
+        # the model or the pitch shift. Drops fall monotonically as real history grows:
+        #   hist 1.0 -> 2.59    hist 2.0 -> 2.59    hist 3.0 -> 2.03    hist 4.0 -> 1.79
+        # History is free: latency is emit+lookahead, so it stays at 1500ms regardless.
+        # And it does not threaten real time — inference median/p95/max went
+        # 281/291/691ms at 1.0s to 354/368/411ms at 4.0s against a 1000ms budget, so the
+        # tail actually improved. Larger still may help; 4.0 was where measuring stopped.
+        #
+        # This also corrects an earlier wrong conclusion: content-similarity measurements
+        # said history beyond 1.0s HURT, and on that basis I told the user the remaining
+        # roughness was the model's ceiling. Content similarity is blind to dropouts.
+        self.hist_sec = 4.0     # real past context (free — already buffered)
         self.emit_sec = 1.0     # block actually sent (smaller measured worse)
         # Was tried at 1.0: better content on paper, but it pushed latency to 2.0s AND
         # made the inference tail far worse (p95 327->462ms, worst call 1354->3900ms
