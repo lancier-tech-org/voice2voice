@@ -125,6 +125,15 @@ class StreamProcessor:
         self.gate_adaptive = True
         self.gate_bias = 0.50       # <1 favours keeping speech over killing noise
         self.gate_abs_floor = 0.0004
+        # Threshold may never fall below this multiple of the tracked noise floor, so
+        # silent input always yields silent output regardless of how noisy the mic is.
+        self.gate_noise_mult = 3.0
+        self.gate_noise_down = 0.05
+        # A speech-relative floor was TRIED and DISABLED (0.0). It fixed the
+        # silence-heavy recordings (094723 75%->5% of silent frames producing sound) but
+        # destroyed 13-36% of speech on the user's normal sessions, because recordings
+        # differ far too much in dynamic range for one fraction to suit both.
+        self.gate_speech_frac = 0.0
         self._noise_est = None
         self._speech_est = None
 
@@ -231,15 +240,40 @@ class StreamProcessor:
             # words — measured as speech loss rising 0.17% -> 3.02% on in_105612.
             # So the noise floor follows evidence of quiet quickly but rises only
             # very slowly, and the speech level does the reverse.
-            self._noise_est = (0.7 * self._noise_est + 0.3 * lo) if lo < self._noise_est \
+            # Down-rate is deliberately SLOW. At 0.3 the estimate chased the minimum,
+            # so a completely dead stretch dragged it toward zero -- and since the floor
+            # below is a multiple of it, the gate then reopened on mic hiss. This must
+            # track the TYPICAL noise level, not the quietest moment ever seen.
+            self._noise_est = ((1 - self.gate_noise_down) * self._noise_est
+                               + self.gate_noise_down * lo) if lo < self._noise_est \
                 else (0.995 * self._noise_est + 0.005 * lo)
-            self._speech_est = (0.7 * self._speech_est + 0.3 * hi) if hi > self._speech_est \
-                else (0.99 * self._speech_est + 0.01 * hi)
+            if hi > self._speech_est:
+                self._speech_est = 0.7 * self._speech_est + 0.3 * hi
+            elif hi > self.gate_noise_mult * self._noise_est:
+                self._speech_est = 0.99 * self._speech_est + 0.01 * hi
+            # else HOLD. Letting the speech estimate decay through a long silence drags
+            # the threshold (which scales with its square root) down until the gate
+            # opens on mic noise — the user hears background noise appear precisely
+            # when they stop talking. Freezing it keeps the threshold where actual
+            # speech calibrated it.
         thr = self.gate_bias * float(np.sqrt(
             max(self._noise_est, 1e-9) * max(self._speech_est, 1e-9)))
-        # Never above half the speech level (that would cut speech), never below the
-        # absolute floor (that would gate nothing at all).
+        # Never above half the speech level — that would cut speech.
         thr = min(thr, 0.5 * self._speech_est)
+        # Never below a multiple of THIS speaker's own noise floor. An absolute floor
+        # cannot do this job: the user's mic noise measures 0.00025-0.00148 depending on
+        # the session, so a fixed 0.0004 sits BELOW the noise on a noisier day, the gate
+        # opens on pure mic hiss, RVC converts it and hallucinates sound out of silence.
+        # Tying the floor to the tracked noise level closes the gate on noise whatever
+        # its absolute level, which is what "silent input must give silent output"
+        # actually requires.
+        thr = max(thr, self.gate_noise_mult * self._noise_est)
+        # And never below a fraction of the SPEECH level. The noise-relative floor above
+        # is not enough on its own: recordings containing completely dead stretches drag
+        # the tracked noise floor toward zero, so "3x the noise" collapses with it and the
+        # gate reopens on hiss. The speech estimate is held through silence (see the
+        # update rule), so a speech-relative floor cannot collapse the same way.
+        thr = max(thr, self.gate_speech_frac * self._speech_est)
         return max(thr, self.gate_abs_floor)
 
     def _gate_decision(self, env, thr):
