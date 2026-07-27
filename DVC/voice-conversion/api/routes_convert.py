@@ -14,6 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 import config
+from inference.stream_processor import StreamProcessor
 
 router = APIRouter()
 
@@ -110,7 +111,11 @@ def load_target_f0(voice_name):
 async def stream_convert(websocket: WebSocket):
     await websocket.accept()
     state = websocket.app.state.app_state
-    processor = state.stream_processor
+    # OWN processor per connection (see AppState). Cheap: it holds buffers and
+    # scalars, and reuses the shared, already-warmed converter.
+    processor = StreamProcessor(state.converter)
+    state.session_token += 1
+    my_token = state.session_token
     frame_count = 0
 
     # DEV capture (observe-only, off unless DEBUG_RECORD=1). Taps raw mic input and
@@ -182,6 +187,11 @@ async def stream_convert(websocket: WebSocket):
         out_seq = 0          # diagnostic block counter (see header below)
 
         while True:
+            # A newer session has taken the shared converter; stop rather than fight
+            # over which voice is loaded.
+            if my_token != state.session_token:
+                print(f"[WebSocket] Session superseded by a newer one; closing.")
+                break
             try:
                 message = await websocket.receive()
             except WebSocketDisconnect:

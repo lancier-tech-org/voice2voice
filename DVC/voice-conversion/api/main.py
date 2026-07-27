@@ -38,7 +38,18 @@ app.add_middleware(
 
 class AppState:
     converter: RVCConverter = None
+    # Kept only so /health can report a latency figure and so the startup warm-up has
+    # something to hold. Each websocket now builds its OWN StreamProcessor: they carry
+    # per-session state (input buffer, read position, gate level estimates) and sharing
+    # one instance meant two concurrent connections -- a second browser tab, or Start
+    # pressed again before the old socket closed -- wrote into the same buffer and
+    # corrupted each other's audio.
     stream_processor: StreamProcessor = None
+    # Token for the newest session. The RVCConverter still holds ONE loaded voice, so two
+    # sessions cannot convert to different voices at once. Rather than silently returning
+    # the wrong voice, or refusing the new session (which would lock the user out if an
+    # old socket lingered), the newest session wins and older ones exit.
+    session_token: int = 0
     trainer: RVCTrainer = None
     training_tasks: dict = {}
 

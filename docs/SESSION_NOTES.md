@@ -102,3 +102,48 @@ integration, done on a branch, validated step by step.
 - The audio path files: `inference/stream_processor.py`, `inference/rvc_converter.py`,
   `api/routes_convert.py`, `frontend/index.html` (playback). Training is separate.
 - Trained models are BUILD ARTIFACTS — copy at deploy, never retrain on the server.
+
+---
+
+## 8. Working configuration (2026-07-27) — user-verified
+Tag `audio-good-vamsi8-phone`. User: "i tested the voice in phone at -8 vamsi voice and
+its clear".
+
+**Use the phone as the microphone, and `vamsi` at -8 semitones.**
+
+Measured on their real session: silence sits **-24 dB** below speech with only 3% of
+silent frames non-zero (the laptop mic gave -2 dB and 77%); periodicity 0.654 against
+their input's 0.775, i.e. 84% of the harmonic structure retained (`pavan_sai` at -12
+gave 0.42); pacing 0.983; capture 100%.
+
+**The two things that mattered were both OUTSIDE the conversion code:**
+
+1. **Microphone.** Phone: noise floor 0.00000, speech 0.093. Laptop: floor 0.0004,
+   speech 0.003 — only 4-10x apart, i.e. the user's quiet speech and the laptop's noise
+   OVERLAP in level. Eight gate strategies were tried and measured; every one fails the
+   same way, because no threshold can separate two things that overlap. The laptop mic
+   was the entire "background noise" complaint.
+2. **Target voice pitch, not the shift amount.** Required shift = gap between source and
+   TARGET F0. Source 262 Hz. `pavan_sai` 125 Hz -> -13 (periodicity 0.42);
+   `vamsi` 169 Hz -> **-8** (periodicity 0.65) and still clearly male. Measure a
+   candidate target's F0 from `rvc-webui/logs/<voice>/0_gt_wavs` BEFORE choosing it.
+   Do not shrink the shift below what the target needs — pick a better-matched target.
+
+**Residual, accepted:** chopping at ~2.5 abrupt drops/s vs 0.2 offline; ~3.8% speech
+loss; ~1.5 s latency. Every cheap lever swept and negative (see AUDIO_ISSUES.md). The
+only remaining fix is the vendored tensor engine with cached pitch state — not attempted.
+
+## 9. Hardening done 2026-07-27
+- **Per-session StreamProcessor.** Previously ONE instance served every websocket, so two
+  concurrent connections (second tab, or Start pressed before the old socket closed) wrote
+  into the same input buffer and read position and corrupted each other. Each connection
+  now builds its own. The RVCConverter is still shared and holds one loaded voice, so the
+  newest session wins via `state.session_token` and older ones exit cleanly — verified:
+  older session closed after 1 block, newer ran isolated with its own contiguous sequence.
+- **NVIDIA driver pinned.** All 22 nvidia/libnvidia packages `apt-mark hold`'d.
+  unattended-upgrades swapping 535 for 580 mid-session broke the GPU on 2026-07-27.
+- **`nvidia-cdi-refresh.service`** (new, enabled): regenerates `/var/run/cdi/nvidia.yaml`
+  before docker.service starts. The second half of that outage was the CDI spec still
+  listing deleted 535 library paths, which makes every `--gpus` container fail with
+  "failed to fulfil mount request". Recovery then needed a manual module reload plus
+  `nvidia-ctk cdi generate`. Verified: spec references match the running driver.
