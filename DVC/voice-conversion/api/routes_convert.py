@@ -5,6 +5,7 @@ Includes auto pitch detection for cross-gender conversion.
 
 import asyncio
 import json
+import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -178,6 +179,7 @@ async def stream_convert(websocket: WebSocket):
         })
 
         total_latency = 0
+        out_seq = 0          # diagnostic block counter (see header below)
 
         while True:
             try:
@@ -274,7 +276,16 @@ async def stream_convert(websocket: WebSocket):
                 if output_bytes is not None:
                     if dbg_on:
                         dbg_out.append(np.frombuffer(output_bytes, dtype=np.float32).copy())
-                    await websocket.send_bytes(output_bytes)
+                    # 12-byte header: sequence number + the moment the server sent it.
+                    # Purely diagnostic. Playback ran dry twice for ~1s in a 27s
+                    # session while the server measured clean, so the stall is either
+                    # the network or the browser's main thread and there is currently
+                    # no way to tell which. A sequence number exposes lost/reordered
+                    # blocks; the send time exposes transit variation. 12 bytes stays
+                    # 4-byte aligned so the audio still reads as a Float32Array.
+                    out_seq += 1
+                    header = struct.pack("<Id", out_seq, time.time() * 1000.0)
+                    await websocket.send_bytes(header + output_bytes)
 
                     if frame_count % 50 == 0:
                         avg_latency = total_latency / frame_count

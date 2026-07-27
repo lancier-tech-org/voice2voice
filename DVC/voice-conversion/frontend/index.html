@@ -110,6 +110,8 @@
         <div class="stat"><div class="value" id="underrunValue">0</div><div class="label">Breaks</div></div>
         <div class="stat"><div class="value" id="syncValue">—</div><div class="label">Sync (want 1.000)</div></div>
         <div class="stat"><div class="value" id="ratesValue">—</div><div class="label">Rates in/out</div></div>
+        <div class="stat"><div class="value" id="netValue">—</div><div class="label">Net jitter</div></div>
+        <div class="stat"><div class="value" id="jankValue">—</div><div class="label">Browser stall</div></div>
       </div>
       <div class="note" style="margin-top:16px">Use headphones to avoid echo feedback</div>
     </div>
@@ -124,6 +126,10 @@ let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // scheduler with silence to play. Trades this much delay for not breaking up.
 const PLAY_BUFFER=0.25;
 let underruns=0, starveTotal=0;
+// Diagnostics that separate a NETWORK stall from a BROWSER stall. Playback ran dry
+// twice for ~1s in a 27s session while the server measured completely clean, so the
+// delay is in one of those two layers and nothing so far could tell them apart.
+let lastSeq=0, lostBlocks=0, minTransit=null, netJitter=0, jank=0, jankTimer=null;
 // Audio seconds received vs wall seconds elapsed. Must sit at ~1.00. Below 1.00 the
 // server is producing less audio than real time (playback will starve); above 1.00
 // it is producing more (delay will pile up). This is the one number that separates
@@ -276,6 +282,19 @@ async function startConversion(){
     mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
 
     playCtx=new AudioContext({sampleRate:48000}); await playCtx.resume(); nextPlayTime=0;
+    underruns=0; starveTotal=0; audioSecs=0; firstBlockAt=0;
+    lastSeq=0; lostBlocks=0; minTransit=null; netJitter=0; jank=0;
+    // Independent main-thread stall detector. A timer asked to fire every 100ms can
+    // only run late if the main thread was blocked — and playback is scheduled on
+    // that same thread. So large jank means the BROWSER stalled; small jank with
+    // large net jitter means the NETWORK stalled. Nothing else separates the two.
+    if(jankTimer) clearInterval(jankTimer);
+    let jankLast=performance.now();
+    jankTimer=setInterval(()=>{
+      const n=performance.now();
+      jank=Math.max(jank,n-jankLast-100);
+      jankLast=n;
+    },100);
     captureCtx=new AudioContext({sampleRate:48000}); await captureCtx.resume();
     const src=captureCtx.createMediaStreamSource(mediaStream);
     scriptProc=captureCtx.createScriptProcessor(4096,1,1);
@@ -321,7 +340,21 @@ async function startConversion(){
         return;
       }
       chunkCount++;
-      const f32=new Float32Array(ev.data); if(!f32.length)return;
+      // 12-byte diagnostic header from the server: block number + send time.
+      const dv=new DataView(ev.data);
+      const seq=dv.getUint32(0,true), sentMs=dv.getFloat64(4,true);
+      const arrived=Date.now();
+      if(lastSeq&&seq!==lastSeq+1) lostBlocks+=Math.max(0,seq-lastSeq-1);
+      lastSeq=seq;
+      // Server and browser clocks are not synchronised, so absolute transit time is
+      // meaningless. The VARIATION is not: take the smallest transit seen as the
+      // baseline and report how far above it the worst block ran. That is network
+      // delay, independent of clock offset.
+      const transit=arrived-sentMs;
+      if(minTransit===null||transit<minTransit) minTransit=transit;
+      netJitter=Math.max(netJitter,transit-minTransit);
+
+      const f32=new Float32Array(ev.data,12); if(!f32.length)return;
       // Use the context's real rate, not a hardcoded 48000: if they differ the
       // audio is played at the wrong speed and the queue drains.
       const buf=playCtx.createBuffer(1,f32.length,playCtx.sampleRate);
@@ -344,11 +377,20 @@ async function startConversion(){
       const el=document.getElementById('underrunValue');
       if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
 
-      if(!firstBlockAt) firstBlockAt=performance.now();
+      // Sync: audio seconds delivered per wall second. Was off by exactly one block
+      // — it counted this block's full second but started the clock at this block, so
+      // it read N/(N-1) and showed 1.037 at 28 chunks purely as an artefact. That
+      // false 3.7% "over-delivery" sent a whole investigation down a dead end.
+      // Start the clock one block-duration BEFORE the first block instead.
+      if(!firstBlockAt) firstBlockAt=performance.now()-buf.duration*1000;
       audioSecs+=buf.duration;
       const wall=(performance.now()-firstBlockAt)/1000;
       const sy=document.getElementById('syncValue');
       if(sy&&wall>2) sy.textContent=(audioSecs/wall).toFixed(3);
+      const nj=document.getElementById('netValue');
+      if(nj) nj.textContent=Math.round(netJitter)+'ms'+(lostBlocks?' L'+lostBlocks:'');
+      const jk=document.getElementById('jankValue');
+      if(jk) jk.textContent=Math.round(jank)+'ms';
       const rt=document.getElementById('ratesValue');
       if(rt) rt.textContent=Math.round(captureCtx.sampleRate/1000)+'/'+
                             Math.round(playCtx.sampleRate/1000)+'k';
@@ -377,6 +419,7 @@ function stopConversion(){
   if(ws){const r=ws;ws=null;try{r.send(JSON.stringify({action:'stop'}));}catch(e){}try{r.close();}catch(e){}}
   if(scriptProc)try{scriptProc.disconnect();}catch(e){}scriptProc=null;
   if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());}mediaStream=null;
+  if(jankTimer){clearInterval(jankTimer);jankTimer=null;}
   if(captureCtx)try{captureCtx.close();}catch(e){}captureCtx=null;
   if(playCtx)try{playCtx.close();}catch(e){}playCtx=null;
   document.getElementById('micBtn').classList.remove('recording');
