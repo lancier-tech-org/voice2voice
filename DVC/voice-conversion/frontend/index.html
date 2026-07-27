@@ -377,6 +377,7 @@ async function startConversion(){
         //   produced > sent       -> the main thread dropped frames (socket not ready)
         //   produced == sent == expected, yet Sync < 1 -> loss is not in the browser
         workletNode.port.onmessage=(e)=>{
+          if(!framesMade) captureStart=performance.now();   // baseline: first real frame
           framesMade=e.data.made;
           if(ws&&ready&&ws.readyState===1){ ws.send(e.data.b); framesSent++; }
         };
@@ -495,8 +496,9 @@ async function startConversion(){
       if(jk) jk.textContent=Math.round(jank)+'ms';
       const cp=showStats&&document.getElementById('captureValue');
       if(cp){
+        // +1 because the baseline is set AT the first frame, not before it
         const secs=(performance.now()-captureStart)/1000;
-        const expect=Math.max(1,Math.round(secs*48000/4096));
+        const expect=Math.max(1,Math.round(secs*48000/4096)+1);
         cp.textContent=capturePath[0].toUpperCase()+' '+framesSent+'/'+framesMade+'/'+expect;
       }
       const rt=showStats&&document.getElementById('ratesValue');
