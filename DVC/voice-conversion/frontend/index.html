@@ -323,7 +323,24 @@ async function startConversion(){
       jankLast=n;
     },100);
     let ready=false;   // declared before capture starts: the worklet handler reads it
-    captureCtx=new AudioContext({sampleRate:48000}); await captureCtx.resume();
+    // latencyHint:'playback' asks Chrome for the LARGEST audio device buffer instead
+    // of the smallest. This is the one lever against capture starvation: the audio
+    // thread is woken less often with more samples each time, so a scheduling delay
+    // that would have missed a small buffer no longer loses anything.
+    //
+    // Needed because capture loss is now the dominant cause of breaks and it is not in
+    // this codebase. Measured across sessions on identical code, frames the audio
+    // thread produced vs owed: 586/586 and 555/556 (perfect) on an idle machine, but
+    // 587/725, 448/511 and 491/584 when it was busy -- 16-19% of the user's speech
+    // never sampled, which starves playback and is heard as breaks. sent == made in
+    // every case, so nothing is dropped after capture.
+    //
+    // Costs roughly 100-200ms of extra input latency. Cheap against losing a sixth of
+    // the words, and one word to revert.
+    captureCtx=new AudioContext({sampleRate:48000,latencyHint:'playback'});
+    await captureCtx.resume();
+    console.log('capture buffer latency:', captureCtx.baseLatency,
+                's  outputLatency:', captureCtx.outputLatency);
     srcNode=captureCtx.createMediaStreamSource(mediaStream);
     muteNode=captureCtx.createGain(); muteNode.gain.value=0;
     muteNode.connect(captureCtx.destination);
