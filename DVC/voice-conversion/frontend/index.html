@@ -112,6 +112,7 @@
         <div class="stat"><div class="value" id="ratesValue">—</div><div class="label">Rates in/out</div></div>
         <div class="stat"><div class="value" id="netValue">—</div><div class="label">Net jitter</div></div>
         <div class="stat"><div class="value" id="jankValue">—</div><div class="label">Browser stall</div></div>
+        <div class="stat"><div class="value" id="captureValue">—</div><div class="label">Capture sent/made/expected</div></div>
       </div>
       <div class="note" style="margin-top:16px">Use headphones to avoid echo feedback</div>
     </div>
@@ -125,6 +126,9 @@ let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
 // Held at module scope on purpose: WebAudio nodes that are only referenced from a
 // local scope can be garbage collected and silently tear down the capture graph.
 let srcNode=null, muteNode=null, workletNode=null, lastStatPaint=0;
+// Frames the audio thread produced vs frames actually put on the socket, plus which
+// capture API is live. Sync alone says audio is missing but not where from.
+let framesMade=0, framesSent=0, capturePath='?', captureStart=0;
 // Seconds of playback held in reserve so a late converted block does not leave the
 // scheduler with silence to play. Trades this much delay for not breaking up.
 // How much playback is held in reserve, i.e. how late a block may arrive without
@@ -306,6 +310,7 @@ async function startConversion(){
     playCtx=new AudioContext({sampleRate:48000}); await playCtx.resume(); nextPlayTime=0;
     underruns=0; starveTotal=0; audioSecs=0; firstBlockAt=0;
     lastSeq=0; lostBlocks=0; minTransit=null; netJitter=0; jank=0;
+    framesMade=0; framesSent=0; capturePath='?'; captureStart=performance.now();
     // Independent main-thread stall detector. A timer asked to fire every 100ms can
     // only run late if the main thread was blocked — and playback is scheduled on
     // that same thread. So large jank means the BROWSER stalled; small jank with
@@ -353,7 +358,8 @@ async function startConversion(){
                   this.b[this.n++]=ch[i];
                   if(this.n===4096){
                     const c=this.b.slice(0);
-                    this.port.postMessage(c.buffer,[c.buffer]);
+                    this.made=(this.made||0)+1;
+                    this.port.postMessage({b:c.buffer,made:this.made},[c.buffer]);
                     this.n=0;
                   }
                 }
@@ -366,17 +372,22 @@ async function startConversion(){
         await captureCtx.audioWorklet.addModule(url);
         URL.revokeObjectURL(url);
         workletNode=new AudioWorkletNode(captureCtx,'cap');
+        // produced-vs-sent tells us exactly WHERE audio is lost:
+        //   produced < expected   -> the audio thread itself was starved (system load)
+        //   produced > sent       -> the main thread dropped frames (socket not ready)
+        //   produced == sent == expected, yet Sync < 1 -> loss is not in the browser
         workletNode.port.onmessage=(e)=>{
-          if(ws&&ready&&ws.readyState===1) ws.send(e.data);
+          framesMade=e.data.made;
+          if(ws&&ready&&ws.readyState===1){ ws.send(e.data.b); framesSent++; }
         };
         srcNode.connect(workletNode); workletNode.connect(muteNode);
-        usingWorklet=true;
+        usingWorklet=true; capturePath='worklet';
       }catch(err){ console.warn('AudioWorklet unavailable, falling back',err); }
     }
     if(!usingWorklet){
       // Fallback for browsers without AudioWorklet. Known to drop audio under load.
       scriptProc=captureCtx.createScriptProcessor(4096,1,1);
-      srcNode.connect(scriptProc); scriptProc.connect(muteNode);
+      srcNode.connect(scriptProc); scriptProc.connect(muteNode); capturePath='script';
     }
     console.log('capture path:', usingWorklet?'AudioWorklet (audio thread)':'ScriptProcessor (main thread)');
 
@@ -482,6 +493,12 @@ async function startConversion(){
       if(nj) nj.textContent=Math.round(netJitter)+'ms'+(lostBlocks?' L'+lostBlocks:'');
       const jk=showStats&&document.getElementById('jankValue');
       if(jk) jk.textContent=Math.round(jank)+'ms';
+      const cp=showStats&&document.getElementById('captureValue');
+      if(cp){
+        const secs=(performance.now()-captureStart)/1000;
+        const expect=Math.max(1,Math.round(secs*48000/4096));
+        cp.textContent=capturePath[0].toUpperCase()+' '+framesSent+'/'+framesMade+'/'+expect;
+      }
       const rt=showStats&&document.getElementById('ratesValue');
       if(rt) rt.textContent=Math.round(captureCtx.sampleRate/1000)+'/'+
                             Math.round(playCtx.sampleRate/1000)+'k';
@@ -497,7 +514,7 @@ async function startConversion(){
         if(ws&&ready&&ws.readyState===1){
           const d=e.inputBuffer.getChannelData(0);
           const c=new Float32Array(d.length); c.set(d);
-          ws.send(c.buffer);
+          ws.send(c.buffer); framesSent++;
         }
       };
     }
