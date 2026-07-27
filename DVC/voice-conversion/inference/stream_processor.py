@@ -94,8 +94,19 @@ class StreamProcessor:
         # level is about -33dB -- far below the pause noise the user objected to
         # earlier (the reverted hysteresis experiment reached 0.27-0.47, i.e. -11dB).
         # Deleting half the words is much worse than -33dB of hiss in a gap.
+        # Re-tuned on the three newest sessions once the capture loss was fixed (before
+        # that, ~15% of the audio was missing and any tuning was against corrupt input).
+        # Speech frames silenced / pause noise as a fraction of speech level:
+        #            bias 0.35        0.50         0.70         0.90
+        #  062426   0.0% / .0658   0.0% / .0375  0.0% / .0289  0.2% / .0151
+        #  062515   0.0% / .0127   0.8% / .0054  4.6% / .0000  7.1% / .0000
+        #  062559   0.0% / .0527   0.2% / .0334  1.6% / .0195  6.9% / .0000
+        # 0.50 halves the residual hiss for under 1% word loss. 0.70 cuts more noise but
+        # costs 4.6% of the words on one session, which is the very problem 0.35 fixed.
+        # Median pause level is exactly 0.0 at every setting, so pauses are already
+        # silent; what remains at p95 is the edge around speech.
         self.gate_adaptive = True
-        self.gate_bias = 0.35       # <1 favours keeping speech over killing noise
+        self.gate_bias = 0.50       # <1 favours keeping speech over killing noise
         self.gate_abs_floor = 0.0004
         self._noise_est = None
         self._speech_est = None
