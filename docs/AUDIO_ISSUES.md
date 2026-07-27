@@ -100,3 +100,41 @@ see the context change working.
 that are noise: a single run made a 1.0s lookahead look like a clear win, and on
 repeats it was indistinguishable from 0.5s. Always repeat before believing a knob.
 Reproducible so far: `index_rate` 0.75 → 0.2 is worth about +0.02 consistently.
+
+## Chopping / drops — exhaustive negative results (2026-07-27)
+Symptom: audio "chopped mid way", not silence. Metric: abrupt level drops per second
+(level falls below 20% of the preceding 100ms while above 0.02), with **offline
+whole-file conversion as the control** — offline measures 0.17–0.25 drops/s, live
+1.6–1.9. The gap is real, so slicing costs something. Everything below FAILED to close
+it; do not re-sweep without a new idea.
+
+| lever | result |
+|---|---|
+| history 4 / 6 / 8 / 10 s | 2.76 / 2.79 / 2.69 / 2.76 — plateau. Gains stop by ~3-4s |
+| lookahead 0.5 / 1.0 / 1.5 / 2.5 s | 1.87 / 1.59 / 1.82 / 1.76 — within noise |
+| emit 2.0s instead of 1.0s | 2.18 — worse, and costs latency |
+| filter_radius 3 → 7 | 1.70 → 1.91 — worse |
+| protect 0.33 → 0.5 | 1.70 → 1.96 — worse |
+| rms_mix_rate 0.25 → 1.0 / 0.0 | 1.70 / 1.91 — no gain |
+| f0_method harvest | **INVALID — outputs pure silence** (peak 0.000, 0 speech frames). pyworld is broken in this container and fails silently. The metric scored silence as 0.00 drops/s, i.e. perfect. Always check output peak before believing a drop count |
+| per-call input normalisation | now stable anyway: 4.3 dB total range, 2.25 dB p95 step, because the 5.5s window has a steadier peak than the old 1.5s chunk |
+| block-to-block output level | live p95 23.6 dB — but OFFLINE is 24.3 dB and live's median is LOWER (5.08 vs 8.20). Natural speech dynamics, not an artifact |
+
+Also ruled out for this symptom, each measured: whole-block silencing (0 full seconds
+dead over four sessions), the pause gate (0 mid-word closures at every bias), block
+joints (only 0–5% of drops within 20ms of one), and conversion errors (none logged).
+
+**What is left.** The remaining difference between live and offline is structural: live
+makes N independent `vc_single` calls, each re-running reflect-padding and a fresh RMVPE
+pass, versus one continuous pass offline. Fixing that needs the vendored tensor engine
+(`DRW/rvc-webui/tools/rvc_for_realtime.py`) with `cache_pitch`/`cache_pitchf` and the
+generator's `skip_head`/`return_length` arguments, so pitch and feature state stay
+continuous across calls. The pip `rvc` package's `vc_single` cannot do this — it is
+file-in, stateless, and reflect-pads every call.
+
+**Caveat on the metric.** Absolute values are not trustworthy: the user's own raw input
+scores 1.30 drops/s when level-normalised, and offline scores below that. Only the
+live-vs-offline difference under identical treatment means anything. The user also
+described the chopping as happening "a few times" per session, while this metric fires
+about once per second — so it may be counting inaudible events, and the true audible
+rate could be much lower than the numbers suggest.
