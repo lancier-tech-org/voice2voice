@@ -122,6 +122,9 @@
 const API=location.origin, WS_PROTO=(location.protocol==="https:"?"wss:":"ws:"), WS_URL=`${WS_PROTO}//${location.host}/api/convert/stream`;
 let selectedVoice=null, isConverting=false, ws=null, mediaStream=null;
 let captureCtx=null, playCtx=null, scriptProc=null, nextPlayTime=0;
+// Held at module scope on purpose: WebAudio nodes that are only referenced from a
+// local scope can be garbage collected and silently tear down the capture graph.
+let srcNode=null, muteNode=null, workletNode=null, lastStatPaint=0;
 // Seconds of playback held in reserve so a late converted block does not leave the
 // scheduler with silence to play. Trades this much delay for not breaking up.
 // How much playback is held in reserve, i.e. how late a block may arrive without
@@ -314,16 +317,70 @@ async function startConversion(){
       jank=Math.max(jank,n-jankLast-100);
       jankLast=n;
     },100);
+    let ready=false;   // declared before capture starts: the worklet handler reads it
     captureCtx=new AudioContext({sampleRate:48000}); await captureCtx.resume();
-    const src=captureCtx.createMediaStreamSource(mediaStream);
-    scriptProc=captureCtx.createScriptProcessor(4096,1,1);
+    srcNode=captureCtx.createMediaStreamSource(mediaStream);
+    muteNode=captureCtx.createGain(); muteNode.gain.value=0;
+    muteNode.connect(captureCtx.destination);
 
-    const mute=captureCtx.createGain(); mute.gain.value=0;
-    mute.connect(captureCtx.destination);
-    src.connect(scriptProc); scriptProc.connect(mute);
+    // CAPTURE ON THE AUDIO THREAD.
+    //
+    // ScriptProcessorNode runs its callback on the main thread, alongside rendering,
+    // WebSocket work and GC. When that thread is busy it silently SKIPS capture
+    // buffers, and the audio in them is gone for good. Measured on a real session:
+    // 61.6s of talking produced only 53.1s of captured audio — 8.5s (14%) never left
+    // the browser, matching the reported Sync of 0.820. That single fault produced all
+    // three symptoms at once: missing words, playback starving for want of blocks, and
+    // the remainder sounding rushed because ~15% of the speech was absent. It also
+    // explains why it started fine and degraded, since the loss accumulates.
+    //
+    // AudioWorklet runs on the browser's dedicated real-time audio thread, which page
+    // work cannot starve. It still hands frames to the main thread to send, but via
+    // postMessage, which QUEUES rather than dropping — so a busy main thread now costs
+    // a little delay instead of losing your voice.
+    //
+    // Frames stay 4096 samples so the server sees exactly what it saw before.
+    let usingWorklet=false;
+    if(captureCtx.audioWorklet){
+      try{
+        const src=`
+          class Cap extends AudioWorkletProcessor{
+            constructor(){super();this.b=new Float32Array(4096);this.n=0;}
+            process(inputs){
+              const ch=inputs[0]&&inputs[0][0];
+              if(ch){
+                for(let i=0;i<ch.length;i++){
+                  this.b[this.n++]=ch[i];
+                  if(this.n===4096){
+                    const c=this.b.slice(0);
+                    this.port.postMessage(c.buffer,[c.buffer]);
+                    this.n=0;
+                  }
+                }
+              }
+              return true;
+            }
+          }
+          registerProcessor('cap',Cap);`;
+        const url=URL.createObjectURL(new Blob([src],{type:'application/javascript'}));
+        await captureCtx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        workletNode=new AudioWorkletNode(captureCtx,'cap');
+        workletNode.port.onmessage=(e)=>{
+          if(ws&&ready&&ws.readyState===1) ws.send(e.data);
+        };
+        srcNode.connect(workletNode); workletNode.connect(muteNode);
+        usingWorklet=true;
+      }catch(err){ console.warn('AudioWorklet unavailable, falling back',err); }
+    }
+    if(!usingWorklet){
+      // Fallback for browsers without AudioWorklet. Known to drop audio under load.
+      scriptProc=captureCtx.createScriptProcessor(4096,1,1);
+      srcNode.connect(scriptProc); scriptProc.connect(muteNode);
+    }
+    console.log('capture path:', usingWorklet?'AudioWorklet (audio thread)':'ScriptProcessor (main thread)');
 
     ws=new WebSocket(WS_URL); ws.binaryType='arraybuffer';
-    let ready=false;
 
     ws.onopen=()=>{
       const pitchVal = pitchMode==='auto' ? 'auto' : parseInt(document.getElementById('pitchSlider').value);
@@ -402,7 +459,13 @@ async function startConversion(){
         if(nextPlayTime<=now+PLAY_BUFFER) nextPlayTime=now+PLAY_BUFFER;
       }
       s.start(nextPlayTime); nextPlayTime+=buf.duration;
-      const el=document.getElementById('underrunValue');
+      // Throttled to ~1/s. These were running on EVERY block, in the message
+      // handler, on the main thread — the same thread capture was competing for.
+      // Cheap to fix and I introduced the contention, so it goes with the worklet.
+      const nowMs=performance.now();
+      const showStats=(nowMs-lastStatPaint>1000);
+      if(showStats) lastStatPaint=nowMs;
+      const el=showStats&&document.getElementById('underrunValue');
       if(el) el.textContent=underruns+' ('+Math.round(starveTotal*1000)+'ms)';
 
       // Sync: audio seconds delivered per wall second. Was off by exactly one block
@@ -413,28 +476,31 @@ async function startConversion(){
       if(!firstBlockAt) firstBlockAt=performance.now()-buf.duration*1000;
       audioSecs+=buf.duration;
       const wall=(performance.now()-firstBlockAt)/1000;
-      const sy=document.getElementById('syncValue');
+      const sy=showStats&&document.getElementById('syncValue');
       if(sy&&wall>2) sy.textContent=(audioSecs/wall).toFixed(3);
-      const nj=document.getElementById('netValue');
+      const nj=showStats&&document.getElementById('netValue');
       if(nj) nj.textContent=Math.round(netJitter)+'ms'+(lostBlocks?' L'+lostBlocks:'');
-      const jk=document.getElementById('jankValue');
+      const jk=showStats&&document.getElementById('jankValue');
       if(jk) jk.textContent=Math.round(jank)+'ms';
-      const rt=document.getElementById('ratesValue');
+      const rt=showStats&&document.getElementById('ratesValue');
       if(rt) rt.textContent=Math.round(captureCtx.sampleRate/1000)+'/'+
                             Math.round(playCtx.sampleRate/1000)+'k';
-      document.getElementById('framesValue').textContent=chunkCount;
+      if(showStats) document.getElementById('framesValue').textContent=chunkCount;
     };
 
     ws.onerror=()=>showToast('Connection error','error');
     ws.onclose=()=>{if(isConverting)stopConversion();};
 
-    scriptProc.onaudioprocess=(e)=>{
-      if(ws&&ready&&ws.readyState===1){
-        const d=e.inputBuffer.getChannelData(0);
-        const c=new Float32Array(d.length); c.set(d);
-        ws.send(c.buffer);
-      }
-    };
+    // Only the fallback path needs this; the worklet posts frames itself.
+    if(scriptProc){
+      scriptProc.onaudioprocess=(e)=>{
+        if(ws&&ready&&ws.readyState===1){
+          const d=e.inputBuffer.getChannelData(0);
+          const c=new Float32Array(d.length); c.set(d);
+          ws.send(c.buffer);
+        }
+      };
+    }
 
     document.getElementById('micBtn').classList.add('recording');
     document.getElementById('statusText').textContent=`Converting → ${selectedVoice}`;
@@ -446,6 +512,9 @@ function stopConversion(){
   isConverting=false;
   if(ws){const r=ws;ws=null;try{r.send(JSON.stringify({action:'stop'}));}catch(e){}try{r.close();}catch(e){}}
   if(scriptProc)try{scriptProc.disconnect();}catch(e){}scriptProc=null;
+  if(workletNode){try{workletNode.port.onmessage=null;workletNode.disconnect();}catch(e){}workletNode=null;}
+  if(srcNode){try{srcNode.disconnect();}catch(e){}srcNode=null;}
+  if(muteNode){try{muteNode.disconnect();}catch(e){}muteNode=null;}
   if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());}mediaStream=null;
   if(jankTimer){clearInterval(jankTimer);jankTimer=null;}
   if(captureCtx)try{captureCtx.close();}catch(e){}captureCtx=null;
