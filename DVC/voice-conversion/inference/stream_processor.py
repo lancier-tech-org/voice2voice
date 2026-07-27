@@ -81,9 +81,22 @@ class StreamProcessor:
         # threshold between them (geometric mean, biased toward keeping speech).
         # Both estimates are slow EMAs, so it follows a drifting mic level instead of
         # progressively deleting more speech.
+        # Bias and floor tuned against the user's FOUR most recent real sessions,
+        # whose median speech frame is only 0.0026-0.0087 (their reported symptom was
+        # "some words are silent, or too quiet to hear"). Speech frames silenced in the
+        # output, and pause noise as a fraction of speech level:
+        #        fixed 0.0040   bias .60/.0008   bias .45/.0005   bias .35/.0004
+        #  053942   50.6%          11.3%             0.5%             0.0%
+        #  055709   26.6%          15.4%             6.6%             0.1%
+        #  053659   34.3%           0.3%             0.0%             0.0%
+        #  pause p95  0.0000        0.0000           0.0114           0.0216
+        # 0.35/0.0004 removes the loss essentially completely, and 0.0216 of speech
+        # level is about -33dB -- far below the pause noise the user objected to
+        # earlier (the reverted hysteresis experiment reached 0.27-0.47, i.e. -11dB).
+        # Deleting half the words is much worse than -33dB of hiss in a gap.
         self.gate_adaptive = True
-        self.gate_bias = 0.6        # <1 favours keeping speech over killing noise
-        self.gate_abs_floor = 0.0008
+        self.gate_bias = 0.35       # <1 favours keeping speech over killing noise
+        self.gate_abs_floor = 0.0004
         self._noise_est = None
         self._speech_est = None
 
