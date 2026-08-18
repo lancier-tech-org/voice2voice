@@ -305,7 +305,24 @@ async function startConversion(){
   if(!selectedVoice||isConverting)return;
   isConverting=true; chunkCount=0;
   try{
-    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
+    // autoGainControl ON (was off).
+    //
+    // On a laptop the user's speech captures at ~0.003 with a noise floor of ~0.0004 --
+    // only 5-26x apart, and quiet consonants fall INSIDE the noise, so no gate can
+    // separate them. On a phone the same speech arrives at 0.093 with a noise floor of
+    // exactly 0.00000, because the phone applies AGC and hardware gating before any app
+    // sees the samples. Changing laptop microphones did not close that gap: built-in mic
+    // sessions actually measured BETTER SNR (26x) than headset ones (5-13x), so it is
+    // the processing that differs, not the microphone.
+    //
+    // This is the closest browser-side equivalent of the phone's AGC and targets the 28x
+    // level difference directly.
+    //
+    // RISK, to be measured rather than assumed: AGC raises gain when the input is quiet,
+    // because it is hunting for signal. During pauses that can amplify the noise floor
+    // and make the silence WORSE even as speech improves. The saved debug recordings
+    // will show both numbers, so the next laptop session settles it either way.
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
 
     playCtx=new AudioContext({sampleRate:48000}); await playCtx.resume(); nextPlayTime=0;
     underruns=0; starveTotal=0; audioSecs=0; firstBlockAt=0;
