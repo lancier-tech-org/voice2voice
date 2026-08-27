@@ -37,6 +37,20 @@ services:
       # lost on every redeploy.
       - ./backend/voices:/app/backend/voices
 
+      # ── Live code mounts (development convenience) ──────────────────────
+      # The container reads the app source straight from this folder instead
+      # of from the baked image, so editing a .py file needs only
+      #     docker compose restart
+      # (~15 s) rather than a full `up -d --build` (~5 min), and editing
+      # frontend/index.html needs only a browser refresh.
+      #
+      # NOTE: the image still contains its own copy of this code. Before
+      # deploying elsewhere (ACR, another VM), rebuild so the image carries
+      # your final source rather than relying on these mounts.
+      # Remove these two lines to go back to running purely from the image.
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+
     restart: unless-stopped
 
     # Model load takes minutes on a cold GPU; give the probe room.
