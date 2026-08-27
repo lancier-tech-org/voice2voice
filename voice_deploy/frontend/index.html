@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Clone — Speech to Speech</title>
+<style>
+  :root {
+    --bg: #0e0e11; --surface: #1a1a20; --surface-hover: #24242c;
+    --border: #2e2e38; --text: #e4e4e8; --text-dim: #8888a0;
+    --accent: #6c5ce7; --green: #00b894; --red: #e74c6c; --radius: 10px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }
+  h1 { font-size: 1.6rem; font-weight: 600; margin-bottom: 6px; }
+  .subtitle { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 32px; }
+  .container { width: 100%; max-width: 540px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .card-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row + .row { margin-top: 10px; }
+  select, input[type="file"] { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 0.85rem; }
+  button { border: none; border-radius: 6px; padding: 10px 20px; font-size: 0.85rem; font-weight: 500; cursor: pointer; transition: background 0.15s, transform 0.1s; }
+  button:active { transform: scale(0.97); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #5a4bd6; }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-secondary { background: var(--surface-hover); color: var(--text); border: 1px solid var(--border); }
+  .btn-danger { background: var(--surface-hover); color: var(--red); border: 1px solid var(--border); }
+  .btn-danger:hover { background: var(--red); color: #fff; }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-mic { width: 72px; height: 72px; border-radius: 50%; font-size: 1.8rem; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: box-shadow 0.2s, background 0.15s; }
+  .btn-mic.active { background: var(--red); box-shadow: 0 0 0 6px rgba(231, 76, 108, 0.25); animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 6px rgba(231, 76, 108, 0.25); } 50% { box-shadow: 0 0 0 14px rgba(231, 76, 108, 0.08); } }
+  .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .dot.connected { background: var(--green); }
+  .dot.error { background: var(--red); }
+  .log { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .log-entry { padding: 8px 12px; border-radius: 6px; font-size: 0.82rem; line-height: 1.5; }
+  .log-entry.info { color: var(--text-dim); font-size: 0.78rem; }
+  .log-entry.error { background: rgba(231, 76, 108, 0.1); border-left: 3px solid var(--red); }
+</style>
+</head>
+<body>
+
+<h1>Voice Clone</h1>
+<p class="subtitle">Speech → Speech · Your voice, their identity</p>
+
+<div class="container">
+  <div class="card">
+    <div class="card-title">Target Voice</div>
+    <div class="row">
+      <select id="voiceSelect"><option value="">Loading voices...</option></select>
+      <button class="btn-secondary" onclick="refreshVoices()" title="Refresh list">↻</button>
+      <button class="btn-danger" onclick="deleteVoice()" title="Delete selected voice">🗑</button>
+    </div>
+    <div class="row">
+      <input type="file" id="voiceUpload"
+             accept=".wav,.mp3,.flac,.ogg,.opus,.m4a,.aac,.webm,audio/*">
+      <button class="btn-secondary" onclick="uploadVoice()">Upload</button>
+    </div>
+  </div>
+
+  <div class="card" style="text-align: center; padding: 28px;">
+    <button id="micBtn" class="btn-primary btn-mic" onclick="toggleMic()" disabled>🎤</button>
+    <div class="status-bar" style="justify-content: center; margin-top: 14px;">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Select a voice to begin</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Activity</div>
+    <div class="log" id="logPanel">
+      <div class="log-entry info">Waiting for speech...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.origin;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
+let ws = null, mediaStream = null, audioCtx = null, workletNode = null, isRecording = false;
+let playCtx = null, nextPlayTime = 0, OUTPUT_SR = 24000;
+
+function initPlayback(sr) {
+  OUTPUT_SR = sr || OUTPUT_SR;
+  if (playCtx) playCtx.close();
+  playCtx = new AudioContext({ sampleRate: OUTPUT_SR });
+  nextPlayTime = playCtx.currentTime;
+}
+
+function playAudioChunk(pcmI16Bytes) {
+  if (!playCtx) initPlayback(OUTPUT_SR);
+  const i16 = new Int16Array(pcmI16Bytes);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const buf = playCtx.createBuffer(1, f32.length, OUTPUT_SR);
+  buf.getChannelData(0).set(f32);
+  const src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playCtx.destination);
+  const now = playCtx.currentTime;
+  if (nextPlayTime < now) nextPlayTime = now;
+  src.start(nextPlayTime);
+  nextPlayTime += buf.duration;
+}
+
+async function refreshVoices(selectName) {
+  const sel = document.getElementById('voiceSelect');
+  const previous = selectName || sel.value;
+  try {
+    const res = await fetch(`${API}/api/voices`);
+    if (!res.ok) { setStatus('error', 'Server not ready'); return; }
+    const data = await res.json();
+    sel.innerHTML = '';
+    const hasVoices = data.voices.length > 0;
+    if (!hasVoices) {
+      sel.innerHTML = '<option value="">No voices — upload one</option>';
+      setStatus('ready', 'Upload a reference voice to begin');
+    } else {
+      data.voices.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v; sel.appendChild(opt);
+      });
+      // Keep the user's selection across a refresh where possible.
+      if (previous && data.voices.includes(previous)) sel.value = previous;
+      setStatus('ready', 'Ready — press the mic');
+    }
+    document.getElementById('micBtn').disabled = !hasVoices;
+    document.querySelector('.btn-danger').disabled = !hasVoices;
+  } catch (e) { setStatus('error', 'Server offline'); }
+}
+
+// Pull a useful message out of any response shape: FastAPI errors use
+// {detail}, our own handlers use {error}, and a 500 returns plain text.
+async function errorText(res) {
+  try {
+    const d = await res.json();
+    return d.detail || d.error || JSON.stringify(d);
+  } catch {
+    return (await res.text().catch(() => '')) || `HTTP ${res.status}`;
+  }
+}
+
+async function uploadVoice() {
+  const fileInput = document.getElementById('voiceUpload');
+  if (!fileInput.files.length) { addLog('error', 'Choose a file first'); return; }
+  const file = fileInput.files[0];
+  const form = new FormData(); form.append('file', file);
+  addLog('info', `Uploading ${file.name}...`);
+  try {
+    const res = await fetch(`${API}/api/voices/upload`, { method: 'POST', body: form });
+    if (!res.ok) { addLog('error', `Upload failed: ${await errorText(res)}`); return; }
+    const data = await res.json();
+    let msg = `Added ${data.filename}`;
+    if (data.converted_from && data.converted_from !== '.wav') {
+      msg += ` (converted from ${data.converted_from})`;
+    }
+    msg += ` — ${data.duration_sec}s`;
+    if (data.truncated) msg += `, only first ${data.used_sec}s used`;
+    addLog('info', msg);
+    fileInput.value = '';
+    await refreshVoices(data.filename);
+  } catch (e) {
+    addLog('error', `Upload failed: ${e.message}`);
+  }
+}
+
+async function deleteVoice() {
+  const sel = document.getElementById('voiceSelect');
+  const voice = sel.value;
+  if (!voice) { addLog('error', 'No voice selected'); return; }
+  if (isRecording) { addLog('error', 'Stop recording before deleting a voice'); return; }
+  if (!confirm(`Delete "${voice}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${API}/api/voices/${encodeURIComponent(voice)}`,
+                            { method: 'DELETE' });
+    if (!res.ok) { addLog('error', `Delete failed: ${await errorText(res)}`); return; }
+    const data = await res.json();
+    addLog('info', `Deleted ${data.deleted}`);
+    await refreshVoices();
+  } catch (e) {
+    addLog('error', `Delete failed: ${e.message}`);
+  }
+}
+
+async function toggleMic() { if (isRecording) stopRecording(); else await startRecording(); }
+
+async function startRecording() {
+  const voice = document.getElementById('voiceSelect').value;
+  if (!voice) { addLog('error', 'Select a voice first'); return; }
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (e) { addLog('error', `Mic access denied: ${e.message}`); return; }
+
+  audioCtx = new AudioContext({ sampleRate: 16000 });
+  await audioCtx.audioWorklet.addModule(createWorkletURL());
+  const source = audioCtx.createMediaStreamSource(mediaStream);
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+  source.connect(workletNode);
+  workletNode.connect(audioCtx.destination);
+
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { ws.send(JSON.stringify({ voice })); };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const msg = JSON.parse(e.data);
+      if (msg.status === 'ready') {
+        initPlayback(msg.output_sr);
+        setStatus('connected', 'Listening...');
+        workletNode.port.onmessage = (ev) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(ev.data); };
+      } else if (msg.type === 'info') {
+        addLog('info', msg.message);
+      } else if (msg.type === 'segment_done') {
+        addLog('info', 'Segment converted and playing');
+      } else if (msg.type === 'error') {
+        addLog('error', msg.message);
+      }
+    } else {
+      playAudioChunk(e.data);
+    }
+  };
+  ws.onerror = () => { setStatus('error', 'Connection error'); };
+  ws.onclose = () => { if (isRecording) stopRecording(); setStatus('ready', 'Disconnected'); };
+
+  isRecording = true;
+  document.getElementById('micBtn').classList.add('active');
+  document.getElementById('micBtn').textContent = '⏹';
+}
+
+function stopRecording() {
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  if (ws) { ws.close(); ws = null; }
+  isRecording = false;
+  document.getElementById('micBtn').classList.remove('active');
+  document.getElementById('micBtn').textContent = '🎤';
+  setStatus('ready', 'Ready — press the mic');
+}
+
+function createWorkletURL() {
+  const code = `
+    class PCMCapture extends AudioWorkletProcessor {
+      constructor() { super(); this._buf = new Float32Array(0); this._chunkSize = 1600; }
+      process(inputs) {
+        const input = inputs[0];
+        if (!input || !input[0]) return true;
+        const samples = input[0];
+        const newBuf = new Float32Array(this._buf.length + samples.length);
+        newBuf.set(this._buf); newBuf.set(samples, this._buf.length); this._buf = newBuf;
+        while (this._buf.length >= this._chunkSize) {
+          const chunk = this._buf.slice(0, this._chunkSize);
+          this._buf = this._buf.slice(this._chunkSize);
+          const i16 = new Int16Array(chunk.length);
+          for (let i = 0; i < chunk.length; i++) { const s = Math.max(-1, Math.min(1, chunk[i])); i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; }
+          this.port.postMessage(i16.buffer, [i16.buffer]);
+        }
+        return true;
+      }
+    }
+    registerProcessor('pcm-capture', PCMCapture);
+  `;
+  return URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+}
+
+function setStatus(state, text) {
+  document.getElementById('statusDot').className = 'dot ' + (state === 'connected' ? 'connected' : state === 'error' ? 'error' : '');
+  document.getElementById('statusText').textContent = text;
+}
+function addLog(type, text) {
+  const panel = document.getElementById('logPanel');
+  const div = document.createElement('div'); div.className = `log-entry ${type}`; div.textContent = text;
+  panel.appendChild(div); panel.scrollTop = panel.scrollHeight;
+  while (panel.children.length > 30) panel.removeChild(panel.firstChild);
+}
+refreshVoices();
+</script>
+</body>
+</html>

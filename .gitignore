@@ -14,3 +14,8 @@ __pycache__/
 
 # Local debug captures
 DVC/voice-conversion/uploads/
+audio-ab/
+
+# TLS material — NEVER commit private keys
+certs/
+**/certs/

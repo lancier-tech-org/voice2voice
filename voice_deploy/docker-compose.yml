@@ -1,0 +1,54 @@
+# =============================================================================
+#  Local / single-VM deployment (Azure NC- or NV-series VM with Docker).
+#  For Azure Container Apps or AKS, use the manifests in README instead.
+#
+#      docker compose build
+#      docker compose up -d
+#      docker compose logs -f
+# =============================================================================
+services:
+  voice-vc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice-vc:1.0.0
+    container_name: voice-vc
+
+    # Single replica by design — the loaded model holds ONE mutable target
+    # voice shared across all sessions. See README § Known Issues, item K-05.
+    deploy:
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    ports:
+      - "8131:8131"
+
+    volumes:
+      # Uploaded reference voices survive container restarts.
+      # NOTE the source path: backend/voices, NOT a voices/ directory at the
+      # project root. config.py resolves "voices" relative to the working
+      # directory, which is /app/backend. See K-11.
+      # On an Azure VM, back this with an Azure Files share, or uploads are
+      # lost on every redeploy.
+      - ./backend/voices:/app/backend/voices
+
+    restart: unless-stopped
+
+    # Model load takes minutes on a cold GPU; give the probe room.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8131/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

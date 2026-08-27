@@ -1,0 +1,15 @@
+# Core voice conversion model
+chatterbox-tts==0.1.7
+
+# Web server
+# NOTE: fastapi and python-multipart floors are set by gradio, which
+# chatterbox-tts pulls in as a hard dependency. Do not lower them.
+fastapi==0.141.1
+uvicorn[standard]==0.30.0
+websockets==12.0
+python-multipart==0.0.32
+
+# Numerical / GPU
+numpy>=1.24.0,<2.0.0
+torch==2.6.0
+torchaudio==2.6.0
